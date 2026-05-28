@@ -1,0 +1,1549 @@
+package com.example.ui.screens
+
+import androidx.compose.animation.*
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.*
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+import android.net.Uri
+import android.provider.OpenableColumns
+import com.example.domain.model.*
+import com.example.ui.theme.TypographyPoster
+import com.example.ui.viewmodel.MainViewModel
+
+sealed class ScreenState {
+    object ClassSelect : ScreenState()
+    object ClassDetail : ScreenState()
+    object ReadingWorkspace : ScreenState()
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun MainAppScreen(
+    viewModel: MainViewModel,
+    modifier: Modifier = Modifier
+) {
+    // Current user flow inside app
+    var currentScreen by remember { mutableStateOf<ScreenState>(ScreenState.ClassSelect) }
+
+    // Dialog trigger states
+    var showCreateClassDialog by remember { mutableStateOf(false) }
+    var showImportBookDialog by remember { mutableStateOf(false) }
+    var showAddNoteDialog by remember { mutableStateOf(false) }
+    var showAddOutlineNoteDialog by remember { mutableStateOf(false) }
+    var selectedOutlineChapter by remember { mutableStateOf<Chapter?>(null) }
+    var selectedOutlineSection by remember { mutableStateOf<String?>(null) }
+
+    val context = LocalContext.current
+
+    // Import Dialog State held at top level to support file pre-filling
+    var bookTitle by remember { mutableStateOf("") }
+    var bookAuthor by remember { mutableStateOf("") }
+    var fileType by remember { mutableStateOf("EPUB") } // "EPUB", "PDF", "TXT"
+    var textContent by remember { mutableStateOf("") }
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val inputStream = context.contentResolver.openInputStream(uri)
+                val text = inputStream?.bufferedReader()?.use { it.readText() } ?: ""
+                
+                // Extract filename as default book title
+                var displayName = "Imported Document"
+                val cursor = context.contentResolver.query(uri, null, null, null, null)
+                cursor?.use {
+                    if (it.moveToFirst()) {
+                        val nameIndex = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (nameIndex != -1) {
+                            displayName = it.getString(nameIndex)
+                        }
+                    }
+                }
+                
+                val extension = if (displayName.contains(".")) displayName.substringAfterLast(".").uppercase() else "TXT"
+                bookTitle = displayName.replace(Regex("\\.[a-zA-Z0-9]+$"), "")
+                bookAuthor = "Local Importer"
+                fileType = if (extension in listOf("EPUB", "PDF", "TXT")) extension else "TXT"
+                textContent = text
+                showImportBookDialog = true
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    // Observers
+    val classes by viewModel.classes.collectAsState()
+    val books by viewModel.books.collectAsState()
+    val chapters by viewModel.chapters.collectAsState()
+    val sentences by viewModel.sentences.collectAsState()
+    val notes by viewModel.notes.collectAsState()
+
+    val activeClass by viewModel.activeClass.collectAsState()
+    val activeBook by viewModel.activeBook.collectAsState()
+    val activeChapter by viewModel.activeChapter.collectAsState()
+    val activeSentenceIndex by viewModel.activeSentenceIndex.collectAsState()
+    val isRewriting by viewModel.isRewriting.collectAsState()
+    val activeRewrite by viewModel.activeRewrite.collectAsState()
+    val currentReadingMode by viewModel.currentReadingMode.collectAsState()
+    val rewrittenSentences by viewModel.rewrittenSentences.collectAsState()
+
+    // Screen configuration for Adaptive Layouts
+    val config = LocalConfiguration.current
+    val isTablet = config.screenWidthDp >= 600
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(
+                            text = if (activeClass != null) activeClass!!.name else "Effortless SQ5R",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 18.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        if (activeBook != null) {
+                            Text(
+                                text = activeBook!!.title,
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                },
+                navigationIcon = {
+                    if (currentScreen != ScreenState.ClassSelect) {
+                        IconButton(
+                            onClick = {
+                                when (currentScreen) {
+                                    ScreenState.ReadingWorkspace -> currentScreen = ScreenState.ClassDetail
+                                    ScreenState.ClassDetail -> currentScreen = ScreenState.ClassSelect
+                                    else -> {}
+                                }
+                            }
+                        ) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                        }
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Home,
+                            contentDescription = "App Logo",
+                            modifier = Modifier.padding(start = 12.dp, end = 4.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                },
+                actions = {
+                    if (currentScreen == ScreenState.ClassSelect) {
+                        IconButton(
+                            onClick = { showCreateClassDialog = true },
+                            modifier = Modifier.testTag("create_class_button")
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = "Create Class")
+                        }
+                    } else if (currentScreen == ScreenState.ClassDetail) {
+                        IconButton(
+                            onClick = {
+                                bookTitle = ""
+                                bookAuthor = ""
+                                fileType = "TXT"
+                                textContent = ""
+                                showImportBookDialog = true
+                            },
+                            modifier = Modifier.testTag("import_book_button")
+                        ) {
+                            Icon(Icons.Default.FileUpload, contentDescription = "Import Material")
+                        }
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    navigationIconContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            )
+        },
+        containerColor = MaterialTheme.colorScheme.background
+    ) { innerPadding ->
+        // Main Transition Container
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+        ) {
+            when (currentScreen) {
+                is ScreenState.ClassSelect -> {
+                    ClassDashboardScreen(
+                        classes = classes,
+                        onCreateClassClick = { showCreateClassDialog = true },
+                        onClassSelected = { studyClass ->
+                            viewModel.selectClass(studyClass)
+                            currentScreen = ScreenState.ClassDetail
+                        },
+                        onDeleteClass = { id -> viewModel.deleteClass(id) }
+                    )
+                }
+                is ScreenState.ClassDetail -> {
+                    ClassWorkspaceScreen(
+                        books = books,
+                        onAddBookClick = {
+                            bookTitle = ""
+                            bookAuthor = ""
+                            fileType = "TXT"
+                            textContent = ""
+                            showImportBookDialog = true
+                        },
+                        onBookSelected = { book ->
+                            viewModel.selectBook(book)
+                            currentScreen = ScreenState.ReadingWorkspace
+                        },
+                        onDeleteBook = { id -> viewModel.deleteBook(id) }
+                    )
+                }
+                is ScreenState.ReadingWorkspace -> {
+                    ReadingWorkspaceScreen(
+                        chapters = chapters,
+                        sentences = if (currentReadingMode == "REWRITE") rewrittenSentences.mapIndexed { idx, s -> Sentence(idx.toString(), "", 0, idx, s, "AI Rewrite") } else sentences,
+                        notes = notes,
+                        activeChapter = activeChapter,
+                        activeSentenceIndex = activeSentenceIndex,
+                        isRewriting = isRewriting,
+                        activeRewrite = activeRewrite,
+                        currentReadingMode = currentReadingMode,
+                        isTablet = isTablet,
+                        onChapterSelected = { ch -> viewModel.selectChapter(ch) },
+                        onPreviousSentence = { viewModel.previousSentence() },
+                        onNextSentence = { viewModel.nextSentence() },
+                        onSentenceSelected = { idx -> viewModel.setSentenceIndex(idx) },
+                        onAddNoteClick = { showAddNoteDialog = true },
+                        onAddOutlineNoteClick = { chapter, section ->
+                            selectedOutlineChapter = chapter
+                            selectedOutlineSection = section
+                            showAddOutlineNoteDialog = true
+                        },
+                        onDeleteNote = { id -> viewModel.deleteNote(id) },
+                        onToggleMode = { mode -> viewModel.toggleReadingMode(mode) },
+                        onAIStyleSelected = { style -> viewModel.rewriteActiveChapter(style) }
+                    )
+                }
+            }
+        }
+    }
+
+    // Modal Dialog: Create Class
+    if (showCreateClassDialog) {
+        var className by remember { mutableStateOf("") }
+        var classDesc by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showCreateClassDialog = false },
+            title = { Text("Start a Class Workspace") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = className,
+                        onValueChange = { className = it },
+                        label = { Text("Class Name (e.g. Physics)") },
+                        modifier = Modifier.fillMaxWidth().testTag("class_name_input"),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = classDesc,
+                        onValueChange = { classDesc = it },
+                        label = { Text("Topic Description / Syllabus") },
+                        modifier = Modifier.fillMaxWidth().testTag("class_desc_input"),
+                        maxLines = 3
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (className.isNotBlank()) {
+                            viewModel.createClass(className, classDesc)
+                            showCreateClassDialog = false
+                        }
+                    },
+                    modifier = Modifier.testTag("submit_class")
+                ) {
+                    Text("Start Class")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCreateClassDialog = false }) {
+                    Text("Dismiss")
+                }
+            }
+        )
+    }
+
+    // Modal Dialog: Import Book
+    if (showImportBookDialog) {
+        AlertDialog(
+            onDismissRequest = { showImportBookDialog = false },
+            title = { Text("Import Reading Material") },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .verticalScroll(rememberScrollState())
+                        .fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedTextField(
+                        value = bookTitle,
+                        onValueChange = { bookTitle = it },
+                        label = { Text("Document Title") },
+                        modifier = Modifier.fillMaxWidth().testTag("book_title_input"),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = bookAuthor,
+                        onValueChange = { bookAuthor = it },
+                        label = { Text("Author") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+
+                    Text("FORMAT TYPE", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        listOf("EPUB", "PDF", "TXT").forEach { format ->
+                            FilterChip(
+                                selected = fileType == format,
+                                onClick = { fileType = format },
+                                label = { Text(format) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(4.dp))
+                    
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("LOAD FILE DIRECTLY:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
+                        TextButton(
+                            onClick = { filePickerLauncher.launch(arrayOf("text/plain")) },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Icon(Icons.Default.FileUpload, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Select .txt file", fontSize = 11.sp)
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = textContent,
+                        onValueChange = { textContent = it },
+                        label = { Text("Write/Paste Content (Optional)") },
+                        placeholder = { Text("Leave blank to autopopulate the textbook section for demo study!") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(150.dp),
+                        maxLines = 8
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (bookTitle.isNotBlank()) {
+                            viewModel.importBook(bookTitle, bookAuthor, fileType, textContent)
+                            showImportBookDialog = false
+                        }
+                    },
+                    modifier = Modifier.testTag("submit_book")
+                ) {
+                    Text("Load & Parse")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showImportBookDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Modal Dialog: Add Note
+    if (showAddNoteDialog) {
+        var noteText by remember { mutableStateOf("") }
+        var isQuestion by remember { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = { showAddNoteDialog = false },
+            title = { Text(if (isQuestion) "Ask a Guiding Question (SQ)" else "Record active Insight (R)") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Response Link:")
+                        FilterChip(
+                            selected = !isQuestion,
+                            onClick = { isQuestion = false },
+                            label = { Text("Study Note") }
+                        )
+                        FilterChip(
+                            selected = isQuestion,
+                            onClick = { isQuestion = true },
+                            label = { Text("Syllabus Question") }
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = noteText,
+                        onValueChange = { noteText = it },
+                        placeholder = { Text(if (isQuestion) "What is the core mystery explained here?" else "Record study insights, citations, summaries...") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(120.dp)
+                            .testTag("note_input_field"),
+                        maxLines = 5
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (noteText.isNotBlank()) {
+                            viewModel.addNote(
+                                content = noteText,
+                                type = if (isQuestion) NoteType.QUESTION else NoteType.NOTE
+                            )
+                            showAddNoteDialog = false
+                        }
+                    },
+                    modifier = Modifier.testTag("save_note_button")
+                ) {
+                    Text("Attach Annotation")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddNoteDialog = false }) {
+                    Text("Back")
+                }
+            }
+        )
+    }
+
+    // Modal Dialog: Add Note/Question to specific Outline Section
+    if (showAddOutlineNoteDialog) {
+        var noteText by remember { mutableStateOf("") }
+        var isQuestion by remember { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = { showAddOutlineNoteDialog = false },
+            title = { Text("Annotate Heading: ${selectedOutlineSection ?: "Chapter"}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        FilterChip(
+                            selected = !isQuestion,
+                            onClick = { isQuestion = false },
+                            label = { Text("Note") }
+                        )
+                        FilterChip(
+                            selected = isQuestion,
+                            onClick = { isQuestion = true },
+                            label = { Text("Question") }
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = noteText,
+                        onValueChange = { noteText = it },
+                        placeholder = { Text(if (isQuestion) "What question does this section explore?" else "Summarize outline segment...") },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(100.dp),
+                        maxLines = 4
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (noteText.isNotBlank() && selectedOutlineChapter != null) {
+                            viewModel.addOutlineNote(
+                                chapterIndex = selectedOutlineChapter!!.orderIndex,
+                                sectionTitle = selectedOutlineSection,
+                                content = noteText,
+                                type = if (isQuestion) NoteType.QUESTION else NoteType.NOTE
+                            )
+                            showAddOutlineNoteDialog = false
+                        }
+                    }
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddOutlineNoteDialog = false }) {
+                    Text("Close")
+                }
+            }
+        )
+    }
+}
+
+// ---------------- SUBVIEW 1: Class Dashboard ----------------
+@Composable
+fun ClassDashboardScreen(
+    classes: List<StudyClass>,
+    onCreateClassClick: () -> Unit,
+    onClassSelected: (StudyClass) -> Unit,
+    onDeleteClass: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        // Welcome Poster
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(20.dp))
+                .background(
+                    Brush.horizontalGradient(
+                        colors = listOf(Color(0xFF381E72), Color(0xFF1D1B20))
+                    )
+                )
+                .padding(24.dp)
+        ) {
+            Column {
+                Text(
+                    text = "Welcome to",
+                    fontSize = 14.sp,
+                    color = Color.White.copy(alpha = 0.6f),
+                    fontFamily = FontFamily.Monospace
+                )
+                Text(
+                    text = "Effortless SQ5R",
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = "Unlock active study. Survey outlines, ask questions, read sentence-by-sentence, and record milestones.",
+                    fontSize = 12.sp,
+                    color = Color.White.copy(alpha = 0.8f),
+                    lineHeight = 18.sp
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "YOUR CLASSES",
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.sp,
+                letterSpacing = 1.sp,
+                color = MaterialTheme.colorScheme.primary
+            )
+            TextButton(
+                onClick = onCreateClassClick,
+                contentPadding = PaddingValues(0.dp)
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("New Class")
+            }
+        }
+
+        if (classes.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        Icons.Default.Info,
+                        contentDescription = null,
+                        modifier = Modifier.size(64.dp),
+                        tint = MaterialTheme.colorScheme.secondary.copy(alpha = 0.3f)
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "No study classes yet",
+                        color = Color.Gray,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = "Create a class and upload textbook materials to start.",
+                        fontSize = 11.sp,
+                        color = Color.Gray.copy(alpha = 0.8f),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 32.dp)
+                    )
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                items(classes) { studyClass ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onClassSelected(studyClass) }
+                            .testTag("class_card_${studyClass.name}"),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(90.dp)
+                                .padding(16.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = studyClass.name,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = studyClass.description.ifEmpty { "General academic track" },
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            IconButton(
+                                onClick = { onDeleteClass(studyClass.id) },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Delete,
+                                    contentDescription = "Delete Class",
+                                    tint = Color.Red.copy(alpha = 0.7f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------- SUBVIEW 2: Class Detail / Books Workspace ----------------
+@Composable
+fun ClassWorkspaceScreen(
+    books: List<Book>,
+    onAddBookClick: () -> Unit,
+    onBookSelected: (Book) -> Unit,
+    onDeleteBook: (String) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "STUDY MATERIALS",
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.sp,
+                letterSpacing = 1.sp,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Button(
+                onClick = onAddBookClick,
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+            ) {
+                Icon(Icons.Default.FileUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Import text", fontSize = 12.sp)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        if (books.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        Icons.Default.Info,
+                        contentDescription = null,
+                        modifier = Modifier.size(64.dp),
+                        tint = MaterialTheme.colorScheme.secondary.copy(alpha = 0.3f)
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "Class Workspace empty",
+                        color = Color.Gray,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = "Upload academic pdfs, epubs or notes. We automatically parse structure and outline.",
+                        fontSize = 11.sp,
+                        color = Color.Gray.copy(alpha = 0.8f),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.padding(horizontal = 32.dp)
+                    )
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                items(books) { book ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onBookSelected(book) }
+                            .testTag("book_card_${book.title}"),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = book.title,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = book.fileType.uppercase(),
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = MaterialTheme.colorScheme.onPrimary,
+                                        modifier = Modifier
+                                            .background(
+                                                color = MaterialTheme.colorScheme.primary,
+                                                shape = RoundedCornerShape(4.dp)
+                                            )
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                    Text(
+                                        text = book.author,
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            IconButton(
+                                onClick = { onDeleteBook(book.id) },
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    Icons.Default.Delete,
+                                    contentDescription = "Delete Book",
+                                    tint = Color.Red.copy(alpha = 0.7f)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------- SUBVIEW 3: Reading Workspace (Outline, Reader, Notes Split Panel) ----------------
+@Composable
+fun ReadingWorkspaceScreen(
+    chapters: List<Chapter>,
+    sentences: List<Sentence>,
+    notes: List<Note>,
+    activeChapter: Chapter?,
+    activeSentenceIndex: Int,
+    isRewriting: Boolean,
+    activeRewrite: SavedRewrite?,
+    currentReadingMode: String,
+    isTablet: Boolean,
+    onChapterSelected: (Chapter) -> Unit,
+    onPreviousSentence: () -> Unit,
+    onNextSentence: () -> Unit,
+    onSentenceSelected: (Int) -> Unit,
+    onAddNoteClick: () -> Unit,
+    onAddOutlineNoteClick: (Chapter, String?) -> Unit,
+    onDeleteNote: (String) -> Unit,
+    onToggleMode: (String) -> Unit,
+    onAIStyleSelected: (String) -> Unit
+) {
+    var workspaceTab by remember { mutableStateOf(0) } // 0 = SURVEY OUTLINE, 1 = READ SCRIPT, 2 = NOTE BOARD
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Tab Navigation
+        TabRow(
+            selectedTabIndex = workspaceTab,
+            containerColor = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.primary
+        ) {
+            Tab(
+                selected = workspaceTab == 0,
+                onClick = { workspaceTab = 0 },
+                text = { Text("1. SURVEY", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                icon = { Icon(Icons.Default.List, contentDescription = null, modifier = Modifier.size(18.dp)) }
+            )
+            Tab(
+                selected = workspaceTab == 1,
+                onClick = { workspaceTab = 1 },
+                text = { Text("2. READ", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                icon = { Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp)) }
+            )
+            Tab(
+                selected = workspaceTab == 2,
+                onClick = { workspaceTab = 2 },
+                text = { Text("3. REVIEW", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                icon = { Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp)) }
+            )
+        }
+
+        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            when (workspaceTab) {
+                0 -> {
+                    // SURVEY: Table of contents outline showing chapters, questions, and note counts
+                    SurveyOutlinePane(
+                        chapters = chapters,
+                        notes = notes,
+                        activeChapter = activeChapter,
+                        onChapterSelected = { ch ->
+                            onChapterSelected(ch)
+                            workspaceTab = 1 // Instantly switch to reading view
+                        },
+                        onAddNoteClick = onAddOutlineNoteClick,
+                        onAIStyleSelected = onAIStyleSelected,
+                        isRewriting = isRewriting
+                    )
+                }
+                1 -> {
+                    // READ: Sentence by sentence focused view with typography poster integration
+                    ReadSentencePane(
+                        sentences = sentences,
+                        activeSentenceIndex = activeSentenceIndex,
+                        activeRewrite = activeRewrite,
+                        currentReadingMode = currentReadingMode,
+                        onPrevious = onPreviousSentence,
+                        onNext = onNextSentence,
+                        onSentenceSelected = onSentenceSelected,
+                        onAddNote = onAddNoteClick,
+                        onToggleMode = onToggleMode
+                    )
+                }
+                2 -> {
+                    // REVIEW: The historical board displaying study notes grouped neatly
+                    ReviewNotesPane(
+                        notes = notes,
+                        onDeleteNote = onDeleteNote
+                    )
+                }
+            }
+        }
+    }
+}
+
+// 1. Survey Outline Pane Composable
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun SurveyOutlinePane(
+    chapters: List<Chapter>,
+    notes: List<Note>,
+    activeChapter: Chapter?,
+    onChapterSelected: (Chapter) -> Unit,
+    onAddNoteClick: (Chapter, String?) -> Unit,
+    onAIStyleSelected: (String) -> Unit,
+    isRewriting: Boolean
+) {
+    var expandedChapterIndex by remember { mutableStateOf(-1) }
+    var showRewriteDialog by remember { mutableStateOf(false) }
+    var targetRewriteChapter by remember { mutableStateOf<Chapter?>(null) }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.secondaryContainer, RoundedCornerShape(12.dp))
+                    .padding(12.dp)
+            ) {
+                Text(
+                    text = "💡 SURVEY STEP: Look at the chapters and subheadings below. Formulate mental questions before reading to prime your brain.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    lineHeight = 16.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+
+        itemsIndexed(chapters) { idx, chapter ->
+            val isActive = activeChapter?.id == chapter.id
+            val chapterNotes = notes.filter { it.chapterIndex == chapter.orderIndex }
+            
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .animateContentSize()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(
+                            if (isActive) MaterialTheme.colorScheme.secondaryContainer
+                            else MaterialTheme.colorScheme.surface
+                        )
+                        .border(
+                            width = 1.dp,
+                            color = if (isActive) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.outline.copy(alpha = 0.3f),
+                            shape = RoundedCornerShape(12.dp)
+                        )
+                        .clickable {
+                            expandedChapterIndex = if (expandedChapterIndex == idx) -1 else idx
+                        }
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Chapter ${chapter.orderIndex + 1}",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Text(
+                            text = chapter.title,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Indicators
+                        if (chapterNotes.isNotEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .background(
+                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                                        shape = RoundedCornerShape(8.dp)
+                                    )
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = "${chapterNotes.size} NOTES",
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontFamily = FontFamily.Monospace
+                                )
+                            }
+                        }
+
+                        Icon(
+                            imageVector = if (expandedChapterIndex == idx) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                            contentDescription = "Expand chapter outline",
+                            tint = Color.Gray
+                        )
+                    }
+                }
+
+                // Expanded Section details
+                if (expandedChapterIndex == idx) {
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                    ) {
+                        Column(modifier = Modifier.padding(16.dp)) {
+                            Text(
+                                text = "OUTLINE SUBHEADINGS",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            // We can display the unique action items
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = { onChapterSelected(chapter) },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Icon(Icons.Default.ArrowForward, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Read", fontSize = 12.sp)
+                                }
+
+                                OutlinedButton(
+                                    onClick = {
+                                        targetRewriteChapter = chapter
+                                        showRewriteDialog = true
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Icon(Icons.Default.Star, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("AI Rewrite", fontSize = 12.sp)
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            // Quick outline annotations
+                            Text(
+                                text = "Add localized chapter target / question:",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                TextButton(onClick = { onAddNoteClick(chapter, "Introduction Outline") }) {
+                                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Add Note", fontSize = 11.sp)
+                                }
+                                TextButton(onClick = { onAddNoteClick(chapter, "Review Prompts") }) {
+                                    Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Add Question", fontSize = 11.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showRewriteDialog) {
+        AlertDialog(
+            onDismissRequest = { showRewriteDialog = false },
+            title = { Text("Transform Chapter Text via AI Gateway") },
+            text = {
+                Column {
+                    Text(
+                        text = "Your API key translates the prose into engaging study structures designed to simplify complex chapters.",
+                        fontSize = 12.sp,
+                        color = Color.Gray,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                    listOf("Elementary / Ultra-Simple", "Socratic / Inquiry-Driven", "High Hooking Action").forEach { style ->
+                        Button(
+                            onClick = {
+                                onAIStyleSelected(style)
+                                showRewriteDialog = false
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                        ) {
+                            Text(style)
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showRewriteDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Rewrite generator loading screen
+    if (isRewriting) {
+        Dialog(onDismissRequest = {}) {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color.White),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    CircularProgressIndicator()
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text("Gateway generating AI rewrite...", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Text("Taking original sentences and adapting syntax...", fontSize = 11.sp, color = Color.Gray)
+                }
+            }
+        }
+    }
+}
+
+// 2. Read Sentence Focused Pane Composable
+@Composable
+fun ReadSentencePane(
+    sentences: List<Sentence>,
+    activeSentenceIndex: Int,
+    activeRewrite: SavedRewrite?,
+    currentReadingMode: String,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onSentenceSelected: (Int) -> Unit,
+    onAddNote: () -> Unit,
+    onToggleMode: (String) -> Unit
+) {
+    if (sentences.isEmpty()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(32.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    Icons.Default.ArrowForward,
+                    contentDescription = null,
+                    modifier = Modifier.size(64.dp),
+                    tint = Color.Gray.copy(alpha = 0.5f)
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("Select a chapter in the 'SURVEY' tab to begin reading structure.", textAlign = TextAlign.Center, color = Color.Gray)
+            }
+        }
+        return
+    }
+
+    val currentSentenceObj = sentences.getOrNull(activeSentenceIndex)
+    val totalSentences = sentences.size
+
+    val originalText = currentSentenceObj?.text ?: "No active text"
+    val activeSubheadingText = currentSentenceObj?.sectionTitle ?: "Introductory Reading"
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        // Toggle Panel between Original & Rewrite when rewrite exists
+        if (activeRewrite != null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Button(
+                    onClick = { onToggleMode("ORIGINAL") },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (currentReadingMode == "ORIGINAL") MaterialTheme.colorScheme.primary else Color.Transparent,
+                        contentColor = if (currentReadingMode == "ORIGINAL") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                    ),
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("Original Text", fontSize = 11.sp)
+                }
+
+                Button(
+                    onClick = { onToggleMode("REWRITE") },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (currentReadingMode == "REWRITE") MaterialTheme.colorScheme.primary else Color.Transparent,
+                        contentColor = if (currentReadingMode == "REWRITE") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                    ),
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("AI Rewrite", fontSize = 11.sp)
+                }
+            }
+        }
+
+        // Reading view scroll deck (Prior context indicator)
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                // Secondary preceding context
+                if (activeSentenceIndex > 0) {
+                    Text(
+                        text = sentences.getOrNull(activeSentenceIndex - 1)?.text ?: "",
+                        fontSize = 13.sp,
+                        color = Color.LightGray,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp)
+                            .alpha(0.6f)
+                            .clickable { onPrevious() }
+                    )
+                }
+
+                // Active text highlighted with dynamic poster styling
+                TypographyPoster(
+                    sentence = originalText,
+                    subheading = activeSubheadingText,
+                    index = activeSentenceIndex,
+                    modifier = Modifier.testTag("focused_sentence_poster")
+                )
+
+                // Secondary succeeding context
+                if (activeSentenceIndex < totalSentences - 1) {
+                    Text(
+                        text = sentences.getOrNull(activeSentenceIndex + 1)?.text ?: "",
+                        fontSize = 13.sp,
+                        color = Color.LightGray,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 12.dp)
+                            .alpha(0.6f)
+                            .clickable { onNext() }
+                    )
+                }
+            }
+        }
+
+        // Bottom controller buttons
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // Slider / Indicator
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "${activeSentenceIndex + 1} / $totalSentences",
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                
+                LinearProgressIndicator(
+                    progress = { (activeSentenceIndex + 1).toFloat() / totalSentences.toFloat() },
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 16.dp)
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp)),
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
+                )
+            }
+
+            // Quick Actions & Navigation
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Return / Prev
+                FilledIconButton(
+                    onClick = onPrevious,
+                    modifier = Modifier.size(50.dp),
+                    colors = IconButtonDefaults.filledIconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Icon(
+                        Icons.Default.KeyboardArrowLeft,
+                        contentDescription = "Prev Sentence",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+
+                // Capture Annotation Button
+                Button(
+                    onClick = onAddNote,
+                    modifier = Modifier
+                        .height(50.dp)
+                        .weight(1f)
+                        .padding(horizontal = 16.dp)
+                        .testTag("add_note_fab"),
+                    shape = RoundedCornerShape(25.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                ) {
+                    Icon(Icons.Default.Edit, contentDescription = null)
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Annotate", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                }
+
+                // Forward / Next
+                FilledIconButton(
+                    onClick = onNext,
+                    modifier = Modifier.size(50.dp),
+                    colors = IconButtonDefaults.filledIconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Icon(
+                        Icons.Default.KeyboardArrowRight,
+                        contentDescription = "Next Sentence",
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        }
+    }
+}
+
+// 3. Review Notes Deck Pane Composable
+@Composable
+fun ReviewNotesPane(
+    notes: List<Note>,
+    onDeleteNote: (String) -> Unit
+) {
+    if (notes.isEmpty()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(32.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    Icons.Default.Add,
+                    contentDescription = null,
+                    modifier = Modifier.size(64.dp),
+                    tint = Color.Gray.copy(alpha = 0.5f)
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Text("No annotations recorded yet", fontWeight = FontWeight.Medium, color = Color.Gray)
+                Text(
+                    text = "As you read sentence by sentence, press 'Annotate' to log active takeaways or questions.",
+                    fontSize = 11.sp,
+                    color = Color.Gray.copy(alpha = 0.7f),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 4.dp, start = 16.dp, end = 16.dp)
+                )
+            }
+        }
+        return
+    }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.secondaryContainer, RoundedCornerShape(12.dp))
+                    .padding(12.dp)
+            ) {
+                Text(
+                    text = "✍️ RECITE & REVIEW: Recall the concepts from memory before expanding. Check notes to consolidate facts and evaluate syllabus targets.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    lineHeight = 16.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+
+        items(notes) { note ->
+            Card(
+                modifier = Modifier.fillMaxWidth().testTag("note_card_${note.id}"),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    // Header meta details for citation display
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = if (note.type == NoteType.QUESTION) Icons.Default.Info else Icons.Default.Star,
+                                contentDescription = null,
+                                tint = if (note.type == NoteType.QUESTION) Color(0xFFF39C12) else MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (note.type == NoteType.QUESTION) "SYLLABUS QUESTION" else "SUMMARY TAKEAWAY",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = if (note.type == NoteType.QUESTION) Color(0xFFF39C12) else MaterialTheme.colorScheme.primary,
+                                fontFamily = FontFamily.Monospace,
+                                letterSpacing = 1.sp
+                            )
+                        }
+
+                        IconButton(
+                            onClick = { onDeleteNote(note.id) },
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(Icons.Default.Delete, contentDescription = "Delete Annotation", tint = Color.Red.copy(alpha = 0.5f), modifier = Modifier.size(16.dp))
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Captured note body
+                    Text(
+                        text = note.content,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+
+                    // Quote / Excerpt if available
+                    if (!note.snippet.isNullOrEmpty()) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+                                .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                                .padding(10.dp)
+                        ) {
+                            Column {
+                                Text(
+                                    text = "EXCERPT CITATION",
+                                    fontSize = 8.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = "“${note.snippet}”",
+                                    fontSize = 12.sp,
+                                    fontStyle = FontStyle.Italic,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                    lineHeight = 18.sp
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Fully reconstructed citation grade string
+                    Text(
+                        text = "Anchor: ${note.sectionTitle ?: "General Outlines"}" +
+                                if (note.sentenceIndex != null) " • Sentence ${note.sentenceIndex + 1}" else "",
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+        }
+    }
+}
