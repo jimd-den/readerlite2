@@ -36,6 +36,9 @@ import android.provider.OpenableColumns
 import com.example.domain.model.*
 import com.example.ui.theme.TypographyPoster
 import com.example.ui.viewmodel.MainViewModel
+import com.example.ui.components.KineticCard
+import com.example.ui.components.TypographyPlayground
+import com.example.ui.components.SimpleFlowRow
 
 sealed class ScreenState {
     object ClassSelect : ScreenState()
@@ -133,6 +136,19 @@ fun MainAppScreen(
     val currentReadingMode by viewModel.currentReadingMode.collectAsState()
     val rewrittenSentences by viewModel.rewrittenSentences.collectAsState()
 
+    // Preferences & Engine states
+    val activeTheme by viewModel.activeTheme.collectAsState()
+    val activeFontName by viewModel.activeFontName.collectAsState()
+    val activeFontFamily by viewModel.activeFontFamily.collectAsState()
+    val openRouterKey by viewModel.openRouterKey.collectAsState()
+    val openRouterModel by viewModel.openRouterModel.collectAsState()
+    val openRouterModels by viewModel.openRouterModels.collectAsState()
+    val activeProfile by viewModel.activeProfile.collectAsState()
+    val customProfiles by viewModel.customProfiles.collectAsState()
+
+    var showSettingsDialog by remember { mutableStateOf(false) }
+    var showCalibratorPanel by remember { mutableStateOf(false) }
+
     // Screen configuration for Adaptive Layouts
     val config = LocalConfiguration.current
     val isTablet = config.screenWidthDp >= 600
@@ -202,6 +218,13 @@ fun MainAppScreen(
                         ) {
                             Icon(Icons.Default.FileUpload, contentDescription = "Import Material")
                         }
+                    } else if (currentScreen == ScreenState.ReadingWorkspace) {
+                        IconButton(
+                            onClick = { showSettingsDialog = true },
+                            modifier = Modifier.testTag("global_settings_button")
+                        ) {
+                            Icon(Icons.Default.Settings, contentDescription = "Settings")
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -259,6 +282,9 @@ fun MainAppScreen(
                         activeRewrite = activeRewrite,
                         currentReadingMode = currentReadingMode,
                         isTablet = isTablet,
+                        profile = activeProfile,
+                        customFontFamily = activeFontFamily,
+                        customProfiles = customProfiles,
                         onChapterSelected = { ch -> viewModel.selectChapter(ch) },
                         onPreviousSentence = { viewModel.previousSentence() },
                         onNextSentence = { viewModel.nextSentence() },
@@ -271,11 +297,35 @@ fun MainAppScreen(
                         },
                         onDeleteNote = { id -> viewModel.deleteNote(id) },
                         onToggleMode = { mode -> viewModel.toggleReadingMode(mode) },
-                        onAIStyleSelected = { style -> viewModel.rewriteActiveChapter(style) }
+                        onAIStyleSelected = { style -> viewModel.rewriteActiveChapter(style) },
+                        onProfileSelected = { viewModel.selectMixProfile(it) },
+                        onSaveProfile = { viewModel.saveAsCustomProfile(it) },
+                        onResetDefaults = { viewModel.resetProfileToDefaults() },
+                        onChaosChanged = { viewModel.updateChaos(it) },
+                        onTempoChanged = { viewModel.updateTempo(it) },
+                        onSizeChanged = { viewModel.updateSizeScale(it) },
+                        onWeightChanged = { viewModel.updateWeightContrast(it) },
+                        onOpacityChanged = { viewModel.updateOpacityDepth(it) }
                     )
                 }
             }
         }
+    }
+
+    // Modal Dialog: Reader preferences configuration
+    if (showSettingsDialog) {
+        GlobalSettingsDialog(
+            openRouterKey = openRouterKey,
+            openRouterModel = openRouterModel,
+            openRouterModels = openRouterModels,
+            activeTheme = activeTheme,
+            activeFontName = activeFontName,
+            onSaveOpenRouter = { key, model -> viewModel.saveOpenRouterSettings(key, model) },
+            onSetTheme = { theme -> viewModel.setTheme(theme) },
+            onDownloadFont = { name -> viewModel.downloadAndSetFont(name) },
+            onSetSystemFont = { viewModel.setSystemFont() },
+            onDismiss = { showSettingsDialog = false }
+        )
     }
 
     // Modal Dialog: Create Class
@@ -859,6 +909,9 @@ fun ReadingWorkspaceScreen(
     activeRewrite: SavedRewrite?,
     currentReadingMode: String,
     isTablet: Boolean,
+    profile: MixProfile,
+    customFontFamily: FontFamily?,
+    customProfiles: List<MixProfile>,
     onChapterSelected: (Chapter) -> Unit,
     onPreviousSentence: () -> Unit,
     onNextSentence: () -> Unit,
@@ -867,7 +920,17 @@ fun ReadingWorkspaceScreen(
     onAddOutlineNoteClick: (Chapter, String?) -> Unit,
     onDeleteNote: (String) -> Unit,
     onToggleMode: (String) -> Unit,
-    onAIStyleSelected: (String) -> Unit
+    onAIStyleSelected: (String) -> Unit,
+    
+    // Engine interactions
+    onProfileSelected: (MixProfile) -> Unit,
+    onSaveProfile: (String) -> Unit,
+    onResetDefaults: () -> Unit,
+    onChaosChanged: (Float) -> Unit,
+    onTempoChanged: (Float) -> Unit,
+    onSizeChanged: (Float) -> Unit,
+    onWeightChanged: (Float) -> Unit,
+    onOpacityChanged: (Float) -> Unit
 ) {
     var workspaceTab by remember { mutableStateOf(0) } // 0 = SURVEY OUTLINE, 1 = READ SCRIPT, 2 = NOTE BOARD
 
@@ -922,11 +985,22 @@ fun ReadingWorkspaceScreen(
                         activeSentenceIndex = activeSentenceIndex,
                         activeRewrite = activeRewrite,
                         currentReadingMode = currentReadingMode,
+                        profile = profile,
+                        customFontFamily = customFontFamily,
+                        customProfiles = customProfiles,
                         onPrevious = onPreviousSentence,
                         onNext = onNextSentence,
                         onSentenceSelected = onSentenceSelected,
                         onAddNote = onAddNoteClick,
-                        onToggleMode = onToggleMode
+                        onToggleMode = onToggleMode,
+                        onProfileSelected = onProfileSelected,
+                        onSaveProfile = onSaveProfile,
+                        onResetDefaults = onResetDefaults,
+                        onChaosChanged = onChaosChanged,
+                        onTempoChanged = onTempoChanged,
+                        onSizeChanged = onSizeChanged,
+                        onWeightChanged = onWeightChanged,
+                        onOpacityChanged = onOpacityChanged
                     )
                 }
                 2 -> {
@@ -1196,17 +1270,31 @@ fun SurveyOutlinePane(
 }
 
 // 2. Read Sentence Focused Pane Composable
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ReadSentencePane(
     sentences: List<Sentence>,
     activeSentenceIndex: Int,
     activeRewrite: SavedRewrite?,
     currentReadingMode: String,
+    profile: MixProfile,
+    customFontFamily: FontFamily?,
+    customProfiles: List<MixProfile>,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
     onSentenceSelected: (Int) -> Unit,
     onAddNote: () -> Unit,
-    onToggleMode: (String) -> Unit
+    onToggleMode: (String) -> Unit,
+    
+    // Engine interactions
+    onProfileSelected: (MixProfile) -> Unit,
+    onSaveProfile: (String) -> Unit,
+    onResetDefaults: () -> Unit,
+    onChaosChanged: (Float) -> Unit,
+    onTempoChanged: (Float) -> Unit,
+    onSizeChanged: (Float) -> Unit,
+    onWeightChanged: (Float) -> Unit,
+    onOpacityChanged: (Float) -> Unit
 ) {
     if (sentences.isEmpty()) {
         Box(
@@ -1235,192 +1323,483 @@ fun ReadSentencePane(
     val originalText = currentSentenceObj?.text ?: "No active text"
     val activeSubheadingText = currentSentenceObj?.sectionTitle ?: "Introductory Reading"
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.SpaceBetween
-    ) {
-        // Toggle Panel between Original & Rewrite when rewrite exists
-        if (activeRewrite != null) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
-                    .padding(4.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Button(
-                    onClick = { onToggleMode("ORIGINAL") },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (currentReadingMode == "ORIGINAL") MaterialTheme.colorScheme.primary else Color.Transparent,
-                        contentColor = if (currentReadingMode == "ORIGINAL") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                    ),
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text("Original Text", fontSize = 11.sp)
-                }
+    var showCalibrator by remember { mutableStateOf(false) }
 
-                Button(
-                    onClick = { onToggleMode("REWRITE") },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (currentReadingMode == "REWRITE") MaterialTheme.colorScheme.primary else Color.Transparent,
-                        contentColor = if (currentReadingMode == "REWRITE") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
-                    ),
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text("AI Rewrite", fontSize = 11.sp)
-                }
-            }
-        }
-
-        // Reading view scroll deck (Prior context indicator)
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                // Secondary preceding context
-                if (activeSentenceIndex > 0) {
-                    Text(
-                        text = sentences.getOrNull(activeSentenceIndex - 1)?.text ?: "",
-                        fontSize = 13.sp,
-                        color = Color.LightGray,
-                        textAlign = TextAlign.Center,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(bottom = 12.dp)
-                            .alpha(0.6f)
-                            .clickable { onPrevious() }
-                    )
-                }
-
-                // Active text highlighted with dynamic poster styling
-                TypographyPoster(
-                    sentence = originalText,
-                    subheading = activeSubheadingText,
-                    index = activeSentenceIndex,
-                    modifier = Modifier.testTag("focused_sentence_poster")
-                )
-
-                // Secondary succeeding context
-                if (activeSentenceIndex < totalSentences - 1) {
-                    Text(
-                        text = sentences.getOrNull(activeSentenceIndex + 1)?.text ?: "",
-                        fontSize = 13.sp,
-                        color = Color.LightGray,
-                        textAlign = TextAlign.Center,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 12.dp)
-                            .alpha(0.6f)
-                            .clickable { onNext() }
-                    )
-                }
-            }
-        }
-
-        // Bottom controller buttons
+    Box(modifier = Modifier.fillMaxSize()) {
         Column(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceBetween
         ) {
-            // Slider / Indicator
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "${activeSentenceIndex + 1} / $totalSentences",
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                
-                LinearProgressIndicator(
-                    progress = { (activeSentenceIndex + 1).toFloat() / totalSentences.toFloat() },
+            // Toggle Panel between Original & Rewrite when rewrite exists
+            if (activeRewrite != null) {
+                Row(
                     modifier = Modifier
-                        .weight(1f)
-                        .padding(horizontal = 16.dp)
-                        .height(6.dp)
-                        .clip(RoundedCornerShape(3.dp)),
-                    color = MaterialTheme.colorScheme.primary,
-                    trackColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
-                )
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Button(
+                        onClick = { onToggleMode("ORIGINAL") },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (currentReadingMode == "ORIGINAL") MaterialTheme.colorScheme.primary else Color.Transparent,
+                            contentColor = if (currentReadingMode == "ORIGINAL") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                        ),
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("Original Text", fontSize = 11.sp)
+                    }
+
+                    Button(
+                        onClick = { onToggleMode("REWRITE") },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (currentReadingMode == "REWRITE") MaterialTheme.colorScheme.primary else Color.Transparent,
+                            contentColor = if (currentReadingMode == "REWRITE") MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                        ),
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("AI Rewrite", fontSize = 11.sp)
+                    }
+                }
             }
 
-            // Quick Actions & Navigation
-            Row(
+            // Reading view scroll deck (Prior context indicator)
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 10.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                    .weight(1f)
+                    .fillMaxWidth(),
+                contentAlignment = Alignment.Center
             ) {
-                // Return / Prev
-                FilledIconButton(
-                    onClick = onPrevious,
-                    modifier = Modifier.size(50.dp),
-                    colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                        contentColor = MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    Icon(
-                        Icons.Default.KeyboardArrowLeft,
-                        contentDescription = "Prev Sentence",
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    // Secondary preceding context
+                    if (activeSentenceIndex > 0) {
+                        Text(
+                            text = sentences.getOrNull(activeSentenceIndex - 1)?.text ?: "",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
+                            textAlign = TextAlign.Center,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 12.dp)
+                                .clickable { onPrevious() }
+                        )
+                    }
 
-                // Capture Annotation Button
-                Button(
-                    onClick = onAddNote,
-                    modifier = Modifier
-                        .height(50.dp)
-                        .weight(1f)
-                        .padding(horizontal = 16.dp)
-                        .testTag("add_note_fab"),
-                    shape = RoundedCornerShape(25.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                ) {
-                    Icon(Icons.Default.Edit, contentDescription = null)
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Annotate", fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                }
+                    // Active text highlighted with dynamic kinetic poster styling
+                    KineticCard(
+                        sentenceId = "${currentSentenceObj?.id ?: activeSentenceIndex}_${currentReadingMode}",
+                        sentenceText = originalText,
+                        subheading = activeSubheadingText,
+                        index = activeSentenceIndex,
+                        profile = profile,
+                        userFontSize = 24f, // Dynamic high design size
+                        customFontFamily = customFontFamily,
+                        modifier = Modifier.testTag("focused_sentence_poster")
+                    )
 
-                // Forward / Next
-                FilledIconButton(
-                    onClick = onNext,
-                    modifier = Modifier.size(50.dp),
-                    colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                        contentColor = MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    Icon(
-                        Icons.Default.KeyboardArrowRight,
-                        contentDescription = "Next Sentence",
-                        tint = MaterialTheme.colorScheme.primary
-                    )
+                    // Secondary succeeding context
+                    if (activeSentenceIndex < totalSentences - 1) {
+                        Text(
+                            text = sentences.getOrNull(activeSentenceIndex + 1)?.text ?: "",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
+                            textAlign = TextAlign.Center,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 12.dp)
+                                .clickable { onNext() }
+                        )
+                    }
                 }
             }
+
+            // Bottom controller buttons
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // Slider / Indicator
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "${activeSentenceIndex + 1} / $totalSentences",
+                        fontSize = 12.sp,
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    LinearProgressIndicator(
+                        progress = { (activeSentenceIndex + 1).toFloat() / totalSentences.toFloat() },
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 16.dp)
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(3.dp)),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)
+                    )
+                }
+
+                // Quick Actions & Navigation
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Return / Prev
+                    FilledIconButton(
+                        onClick = onPrevious,
+                        modifier = Modifier.size(50.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            contentColor = MaterialTheme.colorScheme.primary
+                        )
+                    ) {
+                        Icon(
+                            Icons.Default.KeyboardArrowLeft,
+                            contentDescription = "Prev Sentence",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    // Capture Annotation Button
+                    Button(
+                        onClick = onAddNote,
+                        modifier = Modifier
+                            .height(50.dp)
+                            .weight(1f)
+                            .padding(horizontal = 12.dp)
+                            .testTag("add_note_fab"),
+                        shape = RoundedCornerShape(25.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                    ) {
+                        Icon(Icons.Default.Edit, contentDescription = null)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Annotate", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                    }
+
+                    // Calibrator Tuner Toggle Icon
+                    FilledIconButton(
+                        onClick = { showCalibrator = !showCalibrator },
+                        modifier = Modifier.size(50.dp).padding(end = 4.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = if (showCalibrator) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.secondaryContainer,
+                            contentColor = MaterialTheme.colorScheme.primary
+                        )
+                    ) {
+                        Icon(
+                            Icons.Default.Tune,
+                            contentDescription = "Calibrate Engine",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    // Forward / Next
+                    FilledIconButton(
+                        onClick = onNext,
+                        modifier = Modifier.size(50.dp),
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            contentColor = MaterialTheme.colorScheme.primary
+                        )
+                    ) {
+                        Icon(
+                            Icons.Default.KeyboardArrowRight,
+                            contentDescription = "Next Sentence",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
+        }
+
+        // Calibrator sliding panel overlay
+        if (showCalibrator) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.4f))
+                    .clickable { showCalibrator = false }
+            )
+            TypographyPlayground(
+                activeProfile = profile,
+                customProfiles = customProfiles,
+                onProfileSelected = onProfileSelected,
+                onSaveProfile = onSaveProfile,
+                onResetDefaults = onResetDefaults,
+                onChaosChanged = onChaosChanged,
+                onTempoChanged = onTempoChanged,
+                onSizeChanged = onSizeChanged,
+                onWeightChanged = onWeightChanged,
+                onOpacityChanged = onOpacityChanged,
+                onClose = { showCalibrator = false },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .clickable(enabled = false) {} // block click through
+            )
         }
     }
+}
+
+// 2.5 Global Settings Dialog Window Composable
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun GlobalSettingsDialog(
+    openRouterKey: String,
+    openRouterModel: String,
+    openRouterModels: List<Pair<String, String>>,
+    activeTheme: ColorThemeOption,
+    activeFontName: String,
+    onSaveOpenRouter: (String, String) -> Unit,
+    onSetTheme: (ColorThemeOption) -> Unit,
+    onDownloadFont: (String) -> Unit,
+    onSetSystemFont: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var apiKeyInput by remember { mutableStateOf(openRouterKey) }
+    var selectedModelInput by remember { mutableStateOf(openRouterModel) }
+    var fontNameInput by remember { mutableStateOf("") }
+    var showModelDropdown by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "READER PREFERENCES",
+                fontSize = 14.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Section 1: Color Themes
+                Column {
+                    Text(
+                        text = "1. SENSORY COLOR PALETTE",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    SimpleFlowRow(
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        ColorThemeOption.values().forEach { option ->
+                            val isSelected = option == activeTheme
+                            Box(
+                                modifier = Modifier
+                                    .padding(vertical = 4.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(
+                                        if (isSelected) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                    .clickable { onSetTheme(option) }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = option.name.replace("_", " "),
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+
+                // Section 2: Download Custom Fonts from Google Fonts
+                Column {
+                    Text(
+                        text = "2. JIT GOOGLE FONTS",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Input a Google Font name (e.g. Playfair Display, Space Grotesk, Roboto Mono, Montserrat, Lobster) to dynamically download and load it.",
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = fontNameInput,
+                            onValueChange = { fontNameInput = it },
+                            placeholder = { Text("Font Name", fontSize = 11.sp) },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp)
+                        )
+                        Button(
+                            onClick = {
+                                if (fontNameInput.isNotBlank()) {
+                                    onDownloadFont(fontNameInput.trim())
+                                    fontNameInput = ""
+                                }
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            Text("Download", fontSize = 11.sp)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Active Font: $activeFontName",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    if (activeFontName != "System") {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        TextButton(
+                            onClick = onSetSystemFont,
+                            contentPadding = PaddingValues(0.dp)
+                        ) {
+                            Text("Reset to standard sans-serif", fontSize = 10.sp)
+                        }
+                    }
+                }
+
+                Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+
+                // Section 3: OpenRouter API Configuration
+                Column {
+                    Text(
+                        text = "3. OPENROUTER SYNTAX REWRITER",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Input your OpenRouter key to enable deep rewriting of textbook chapters using generative AI.",
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    OutlinedTextField(
+                        value = apiKeyInput,
+                        onValueChange = { apiKeyInput = it },
+                        label = { Text("OpenRouter API Key", fontSize = 10.sp) },
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp)
+                    )
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Model Selection Box
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        OutlinedTextField(
+                            value = selectedModelInput,
+                            onValueChange = { selectedModelInput = it },
+                            label = { Text("Target Generative Model ID", fontSize = 10.sp) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp),
+                            trailingIcon = {
+                                IconButton(onClick = { showModelDropdown = true }) {
+                                    Icon(Icons.Default.ArrowDropDown, contentDescription = "Show fetched list")
+                                }
+                            }
+                        )
+
+                        DropdownMenu(
+                            expanded = showModelDropdown,
+                            onDismissRequest = { showModelDropdown = false },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            val items = if (openRouterModels.isEmpty()) {
+                                listOf(
+                                    Pair("google/gemini-2.5-flash", "Gemini 2.5 Flash"),
+                                    Pair("meta-llama/llama-3-8b-instruct:free", "Llama 3 8B Instruct (Free)"),
+                                    Pair("mistralai/mistral-7b-instruct:free", "Mistral 7B Instruct (Free)"),
+                                    Pair("microsoft/phi-3-medium-128k-instruct:free", "Phi 3 Medium (Free)"),
+                                    Pair("openrouter/auto", "Auto Selector / Default")
+                                )
+                            } else {
+                                openRouterModels
+                            }
+
+                            items.forEach { (modelId, modelFriendlyName) ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text(modelFriendlyName, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                            Text(modelId, fontSize = 9.sp, color = Color.Gray)
+                                        }
+                                    },
+                                    onClick = {
+                                        selectedModelInput = modelId
+                                        showModelDropdown = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    onSaveOpenRouter(apiKeyInput.trim(), selectedModelInput.trim())
+                    onDismiss()
+                }
+            ) {
+                Text("Apply settings")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
 }
 
 // 3. Review Notes Deck Pane Composable

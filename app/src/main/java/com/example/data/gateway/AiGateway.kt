@@ -128,4 +128,100 @@ object AiGateway {
             """.trimIndent()
         }
     }
+
+    suspend fun fetchOpenRouterModels(): List<Pair<String, String>> = withContext(Dispatchers.IO) {
+        val request = Request.Builder()
+            .url("https://openrouter.ai/api/v1/models")
+            .build()
+        try {
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@withContext DEFAULT_ROUTER_MODELS
+                val body = response.body?.string() ?: return@withContext DEFAULT_ROUTER_MODELS
+                val json = JSONObject(body)
+                val data = json.getJSONArray("data")
+                val list = mutableListOf<Pair<String, String>>()
+                for (i in 0 until data.length()) {
+                    val obj = data.getJSONObject(i)
+                    val id = obj.getString("id")
+                    val name = obj.optString("name", id)
+                    list.add(Pair(id, name))
+                }
+                if (list.isEmpty()) DEFAULT_ROUTER_MODELS else list
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error fetching OpenRouter models", e)
+            DEFAULT_ROUTER_MODELS
+        }
+    }
+
+    suspend fun rewriteChapterOpenRouter(
+        apiKey: String,
+        modelId: String,
+        originalText: String,
+        style: String
+    ): String = withContext(Dispatchers.IO) {
+        val prompt = """
+            You are a master educator design genius like Shigeru Miyamoto. 
+            Rewrite the following educational text into the specified style: "$style".
+            Requirements:
+            1. Keep it highly engaging and clear.
+            2. Divide with clear structural subheadings using "## Subheading Name" or "Chapter X: Title".
+            3. Ensure each sentence is impactful, because the user reads this one sentence at a time.
+            4. Retain all major concepts but make them effortless to read.
+            
+            Original Text:
+            $originalText
+        """.trimIndent()
+
+        try {
+            val requestJson = JSONObject().apply {
+                put("model", modelId)
+                put("messages", org.json.JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("content", prompt)
+                    })
+                })
+            }
+
+            val requestBody = requestJson.toString().toRequestBody("application/json".toMediaType())
+            val request = Request.Builder()
+                .url("https://openrouter.ai/api/v1/chat/completions")
+                .header("Authorization", "Bearer $apiKey")
+                .header("HTTP-Referer", "https://ai.studio.build")
+                .header("X-Title", "Effortless SQ5R")
+                .post(requestBody)
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    val errMsg = response.body?.string() ?: ""
+                    Log.e(TAG, "OpenRouter failed: code=${response.code} body=$errMsg")
+                    throw Exception("OpenRouter request failed: code ${response.code}: $errMsg")
+                }
+
+                val responseBodyStr = response.body?.string() ?: ""
+                val responseJson = JSONObject(responseBodyStr)
+                val text = responseJson
+                    .getJSONArray("choices")
+                    .getJSONObject(0)
+                    .getJSONObject("message")
+                    .getString("content")
+                
+                return@withContext text
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in OpenRouter generation", e)
+            throw e
+        }
+    }
+
+    private val DEFAULT_ROUTER_MODELS = listOf(
+        Pair("google/gemini-2.5-flash", "Gemini 2.5 Flash"),
+        Pair("meta-llama/llama-3-8b-instruct:free", "Llama 3 8B Instruct (Free)"),
+        Pair("mistralai/mistral-7b-instruct:free", "Mistral 7B Instruct (Free)"),
+        Pair("microsoft/phi-3-medium-128k-instruct:free", "Phi 3 Medium (Free)"),
+        Pair("openrouter/auto", "Auto Selector / Default")
+    )
 }
+

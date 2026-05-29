@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
 import androidx.compose.ui.Modifier
+import androidx.compose.runtime.collectAsState
 import androidx.lifecycle.ViewModelProvider
 import com.example.ui.screens.MainAppScreen
 import com.example.ui.theme.MyApplicationTheme
@@ -24,7 +25,8 @@ class MainActivity : ComponentActivity() {
         val viewModel = ViewModelProvider(this)[MainViewModel::class.java]
 
         setContent {
-            MyApplicationTheme {
+            val activeTheme = viewModel.activeTheme.collectAsState()
+            MyApplicationTheme(selectedTheme = activeTheme.value) {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     MainAppScreen(
                         viewModel = viewModel,

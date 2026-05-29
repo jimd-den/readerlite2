@@ -1,22 +1,72 @@
 package com.example.ui.viewmodel
 
 import android.app.Application
+import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ReaderApplication
 import com.example.data.gateway.AiGateway
 import com.example.domain.model.*
 import com.example.domain.repository.StudyRepository
+import androidx.compose.ui.text.font.FontFamily
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository: StudyRepository = (application as ReaderApplication).repository
+    private val prefs = application.getSharedPreferences("reader_settings", Context.MODE_PRIVATE)
+
+    // OpenRouter Key
+    private val _openRouterKey = MutableStateFlow(prefs.getString("open_router_key", "") ?: "")
+    val openRouterKey: StateFlow<String> = _openRouterKey.asStateFlow()
+
+    // OpenRouter Model Selection
+    private val _openRouterModel = MutableStateFlow(prefs.getString("open_router_model", "google/gemini-2.5-flash") ?: "google/gemini-2.5-flash")
+    val openRouterModel: StateFlow<String> = _openRouterModel.asStateFlow()
+
+    // OpenRouter Loaded Models list
+    private val _openRouterModels = MutableStateFlow<List<Pair<String, String>>>(emptyList())
+    val openRouterModels: StateFlow<List<Pair<String, String>>> = _openRouterModels.asStateFlow()
+
+    // Active Color Theme Selector
+    private val _activeTheme = MutableStateFlow(
+        try {
+            ColorThemeOption.valueOf(prefs.getString("active_theme", ColorThemeOption.COSMIC_SLATE.name) ?: ColorThemeOption.COSMIC_SLATE.name)
+        } catch(e: Exception) {
+            ColorThemeOption.COSMIC_SLATE
+        }
+    )
+    val activeTheme: StateFlow<ColorThemeOption> = _activeTheme.asStateFlow()
+
+    // Active downloadable google fontfamily tracking
+    private val _activeFontName = MutableStateFlow(prefs.getString("active_font_name", "System") ?: "System")
+    val activeFontName: StateFlow<String> = _activeFontName.asStateFlow()
+
+    private val _activeFontFamily = MutableStateFlow<FontFamily?>(null)
+    val activeFontFamily: StateFlow<FontFamily?> = _activeFontFamily.asStateFlow()
+
+    // --- Active JIT Profile management ---
+    private val _customProfiles = MutableStateFlow<List<MixProfile>>(emptyList())
+    val customProfiles: StateFlow<List<MixProfile>> = _customProfiles.asStateFlow()
+
+    private val _activeProfileId = MutableStateFlow(prefs.getString("active_profile_id", "calm-focus") ?: "calm-focus")
+    val activeProfileId: StateFlow<String> = _activeProfileId.asStateFlow()
+
+    private val _activeProfile = MutableStateFlow<MixProfile>(
+        MixProfile.BUILT_IN_PROFILES.first()
+    )
+    val activeProfile: StateFlow<MixProfile> = _activeProfile.asStateFlow()
 
     init {
+        _customProfiles.value = loadCustomProfilesFromPrefs()
+        _activeProfile.value = retrieveProfileById(_activeProfileId.value)
+        updateLoadedFontFamily(_activeFontName.value)
+        fetchAvailableOpenRouterModels()
+
         viewModelScope.launch {
             repository.getAllClasses().collect { list ->
                 if (list.isEmpty()) {
@@ -282,13 +332,213 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         _isRewriting.value = true
         viewModelScope.launch {
-            val fullText = originalSentences.joinToString(" ") { it.text }
-            val rewritten = AiGateway.rewriteChapter(fullText, style)
-            repository.saveRewrite(bookId, chapterIndex, style, rewritten)
-            loadRewrite(bookId, chapterIndex)
-            _currentReadingMode.value = "REWRITE"
-            _activeSentenceIndex.value = 0
-            _isRewriting.value = false
+            try {
+                val fullText = originalSentences.joinToString(" ") { it.text }
+                val key = _openRouterKey.value
+                val model = _openRouterModel.value
+                
+                val rewritten = if (key.isNotBlank()) {
+                    AiGateway.rewriteChapterOpenRouter(key, model, fullText, style)
+                } else {
+                    AiGateway.rewriteChapter(fullText, style)
+                }
+                
+                repository.saveRewrite(bookId, chapterIndex, style, rewritten)
+                loadRewrite(bookId, chapterIndex)
+                _currentReadingMode.value = "REWRITE"
+                _activeSentenceIndex.value = 0
+            } catch (e: Exception) {
+                e.printStackTrace()
+                // Fail-safe fall back to standard Gemini or Simulated rewrite on network error
+                android.widget.Toast.makeText(getApplication(), "OpenRouter failed: ${e.message}. Using offline default instead.", android.widget.Toast.LENGTH_LONG).show()
+                val fullText = originalSentences.joinToString(" ") { it.text }
+                val rewritten = AiGateway.rewriteChapter(fullText, style)
+                repository.saveRewrite(bookId, chapterIndex, style, rewritten)
+                loadRewrite(bookId, chapterIndex)
+                _currentReadingMode.value = "REWRITE"
+                _activeSentenceIndex.value = 0
+            } finally {
+                _isRewriting.value = false
+            }
         }
+    }
+
+    // --- Dynamic Google Fonts & Custom Themes ---
+    private fun updateLoadedFontFamily(name: String) {
+        if (name == "System") {
+            _activeFontFamily.value = null
+        } else {
+            val file = com.example.ui.util.FontDownloader.getFontFile(getApplication(), name)
+            if (file.exists()) {
+                try {
+                    _activeFontFamily.value = FontFamily(androidx.compose.ui.text.font.Font(file))
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    _activeFontFamily.value = null
+                }
+            } else {
+                _activeFontFamily.value = null
+            }
+        }
+    }
+
+    fun downloadAndSetFont(fontName: String) {
+        viewModelScope.launch {
+            val success = com.example.ui.util.FontDownloader.downloadGoogleFont(getApplication(), fontName)
+            if (success) {
+                prefs.edit().putString("active_font_name", fontName).apply()
+                _activeFontName.value = fontName
+                updateLoadedFontFamily(fontName)
+                android.widget.Toast.makeText(getApplication(), "Font $fontName downloaded successfully!", android.widget.Toast.LENGTH_SHORT).show()
+            } else {
+                android.widget.Toast.makeText(getApplication(), "Failed to download $fontName.", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun setSystemFont() {
+        prefs.edit().putString("active_font_name", "System").apply()
+        _activeFontName.value = "System"
+        _activeFontFamily.value = null
+        android.widget.Toast.makeText(getApplication(), "System font active", android.widget.Toast.LENGTH_SHORT).show()
+    }
+
+    fun saveOpenRouterSettings(key: String, model: String) {
+        prefs.edit().putString("open_router_key", key).putString("open_router_model", model).apply()
+        _openRouterKey.value = key
+        _openRouterModel.value = model
+        android.widget.Toast.makeText(getApplication(), "OpenRouter settings saved successfully!", android.widget.Toast.LENGTH_SHORT).show()
+        fetchAvailableOpenRouterModels()
+    }
+
+    fun fetchAvailableOpenRouterModels() {
+        viewModelScope.launch {
+            try {
+                val list = AiGateway.fetchOpenRouterModels()
+                if (list.isNotEmpty()) {
+                    _openRouterModels.value = list
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun setTheme(theme: ColorThemeOption) {
+        prefs.edit().putString("active_theme", theme.name).apply()
+        _activeTheme.value = theme
+    }
+
+    private fun retrieveProfileById(id: String): MixProfile {
+        val builtIn = MixProfile.BUILT_IN_PROFILES.firstOrNull { it.id == id }
+        if (builtIn != null) return builtIn
+        val customs = loadCustomProfilesFromPrefs()
+        return customs.firstOrNull { it.id == id } ?: MixProfile.BUILT_IN_PROFILES.first()
+    }
+
+    fun selectMixProfile(profile: MixProfile) {
+        prefs.edit().putString("active_profile_id", profile.id).apply()
+        _activeProfileId.value = profile.id
+        _activeProfile.value = profile
+    }
+
+    fun updateChaos(chaos: Float) {
+        val current = _activeProfile.value
+        val updated = current.copy(chaosLevel = chaos.coerceIn(0f, 1f))
+        _activeProfile.value = updated
+    }
+
+    fun updateTempo(tempo: Float) {
+        val current = _activeProfile.value
+        val updated = current.copy(tempoScale = tempo.coerceIn(0.5f, 2.0f))
+        _activeProfile.value = updated
+    }
+
+    fun updateSizeScale(size: Float) {
+        val current = _activeProfile.value
+        val updated = current.copy(sizeScale = size.coerceIn(0.7f, 1.5f))
+        _activeProfile.value = updated
+    }
+
+    fun updateWeightContrast(weight: Float) {
+        val current = _activeProfile.value
+        val updated = current.copy(weightContrast = weight.coerceIn(0f, 1f))
+        _activeProfile.value = updated
+    }
+
+    fun updateOpacityDepth(opacity: Float) {
+        val current = _activeProfile.value
+        val updated = current.copy(opacityDepth = opacity.coerceIn(0f, 1f))
+        _activeProfile.value = updated
+    }
+
+    fun resetProfileToDefaults() {
+        val current = _activeProfile.value
+        val defaultOrOriginal = MixProfile.BUILT_IN_PROFILES.firstOrNull { it.id == current.id }
+            ?: MixProfile.BUILT_IN_PROFILES.first()
+        _activeProfile.value = defaultOrOriginal
+    }
+
+    fun saveAsCustomProfile(name: String) {
+        val cleanName = name.trim()
+        val id = "custom-${System.currentTimeMillis()}"
+        val baseProfile = _activeProfile.value
+        val newProfile = MixProfile(
+            id = id,
+            name = cleanName,
+            isBuiltIn = false,
+            chaosLevel = baseProfile.chaosLevel,
+            tempoScale = baseProfile.tempoScale,
+            sizeScale = baseProfile.sizeScale,
+            weightContrast = baseProfile.weightContrast,
+            opacityDepth = baseProfile.opacityDepth,
+            alignmentBias = "mixed",
+            allowRightAlign = true,
+            animationSet = MixProfile.ACTIVE_CHOREOGRAPHIES,
+            reduceMotion = false
+        )
+        saveCustomProfileToPrefs(newProfile)
+        _customProfiles.value = loadCustomProfilesFromPrefs()
+        selectMixProfile(newProfile)
+        android.widget.Toast.makeText(getApplication(), "Saved custom profile '$cleanName'!", android.widget.Toast.LENGTH_SHORT).show()
+    }
+
+    private fun loadCustomProfilesFromPrefs(): List<MixProfile> {
+        val list = mutableListOf<MixProfile>()
+        val keys = prefs.all.keys
+        for (key in keys) {
+            if (key.startsWith("custom_profile:")) {
+                val data = prefs.getString(key, null) ?: continue
+                val parts = data.split(";")
+                if (parts.size >= 7) {
+                    try {
+                        list.add(
+                            MixProfile(
+                                id = parts[0],
+                                name = parts[1],
+                                isBuiltIn = false,
+                                chaosLevel = parts[2].toFloat(),
+                                tempoScale = parts[3].toFloat(),
+                                sizeScale = parts[4].toFloat(),
+                                weightContrast = parts[5].toFloat(),
+                                opacityDepth = parts[6].toFloat(),
+                                alignmentBias = "mixed",
+                                allowRightAlign = true,
+                                animationSet = MixProfile.ACTIVE_CHOREOGRAPHIES,
+                                reduceMotion = false
+                            )
+                        )
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+            }
+        }
+        return list
+    }
+
+    private fun saveCustomProfileToPrefs(profile: MixProfile) {
+        val data = "${profile.id};${profile.name};${profile.chaosLevel};${profile.tempoScale};${profile.sizeScale};${profile.weightContrast};${profile.opacityDepth}"
+        prefs.edit().putString("custom_profile:${profile.id}", data).apply()
     }
 }
