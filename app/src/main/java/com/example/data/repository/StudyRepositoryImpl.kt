@@ -1,6 +1,7 @@
 package com.example.data.repository
 
 import android.util.Log
+import androidx.room.withTransaction
 import com.example.data.db.*
 import com.example.domain.model.*
 import com.example.domain.repository.StudyRepository
@@ -79,14 +80,23 @@ class StudyRepositoryImpl(
     ): String {
         val bookId = UUID.randomUUID().toString()
 
+        var lastMainChapterTitle: String? = null
         val chaptersList = structure.chapters.mapIndexed { index, parsedCh ->
+            val isSub = parsedCh.isSubchapter
+            val title = parsedCh.title
+            val parent = if (isSub) {
+                parsedCh.parentTitle ?: lastMainChapterTitle
+            } else {
+                lastMainChapterTitle = title
+                null
+            }
             ChapterEntity(
                 id = "${bookId}_ch_${index}",
                 bookId = bookId,
-                title = parsedCh.title,
+                title = title,
                 orderIndex = index,
-                isSubchapter = parsedCh.isSubchapter,
-                parentTitle = parsedCh.parentTitle
+                isSubchapter = isSub,
+                parentTitle = parent
             )
         }
 
@@ -101,21 +111,28 @@ class StudyRepositoryImpl(
             )
         }
 
-        // Persist structured book directly to Room
-        bookDao.insertBook(
-            BookEntity(
-                id = bookId,
-                classId = classId,
-                title = title,
-                author = author.ifEmpty { "Academic Author" },
-                fileType = fileType,
-                filePath = filePath,
-                totalChapters = chaptersList.size,
-                createdAt = System.currentTimeMillis()
+        // Persist structured book directly to Room under a single fast transaction with chunks
+        db.withTransaction {
+            bookDao.insertBook(
+                BookEntity(
+                    id = bookId,
+                    classId = classId,
+                    title = title,
+                    author = author.ifEmpty { "Academic Author" },
+                    fileType = fileType,
+                    filePath = filePath,
+                    totalChapters = chaptersList.size,
+                    createdAt = System.currentTimeMillis()
+                )
             )
-        )
-        chapterDao.insertChapters(chaptersList)
-        sentenceDao.insertSentences(sentencesList)
+            // Use chunks of 500 to avoid SQLite binding/IPC buffer limit exceptions
+            chaptersList.chunked(500).forEach { chunk ->
+                chapterDao.insertChapters(chunk)
+            }
+            sentencesList.chunked(500).forEach { chunk ->
+                sentenceDao.insertSentences(chunk)
+            }
+        }
 
         return bookId
     }

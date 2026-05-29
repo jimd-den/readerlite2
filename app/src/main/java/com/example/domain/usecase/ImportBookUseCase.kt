@@ -34,8 +34,29 @@ class ImportBookUseCase(
             epubExtractor.parseTxtOrPdf(rawContent, title)
         }
 
-        val finalTitle = if (!structure.title.isNullOrEmpty()) structure.title else title
-        val finalAuthor = if (!structure.author.isNullOrEmpty()) structure.author else author
+        val finalTitle = if (fileType == "EPUB" && !structure.title.isNullOrBlank()) {
+            val simpleFileName = try {
+                java.io.File(filePath).name.substringBeforeLast(".")
+            } catch (e: Exception) {
+                ""
+            }
+            val isAutoTitle = title.isBlank() || title == "Imported Document" || 
+                title.replace(" ", "").lowercase() == simpleFileName.replace("-", "").replace("_", "").lowercase()
+            if (isAutoTitle) structure.title else title
+        } else if (!title.isNullOrBlank() && title != "Imported Document") {
+            title
+        } else {
+            if (!structure.title.isNullOrBlank()) structure.title else "Untitled Book"
+        }
+
+        val finalAuthor = if (fileType == "EPUB" && !structure.author.isNullOrBlank()) {
+            val isAutoAuthor = author.isBlank() || author == "Local Importer" || author == "Academic Author"
+            if (isAutoAuthor) structure.author else author
+        } else if (!author.isNullOrBlank() && author != "Local Importer") {
+            author
+        } else {
+            if (!structure.author.isNullOrBlank()) structure.author else "Academic Author"
+        }
 
         return studyRepository.importBook(
             classId = classId,

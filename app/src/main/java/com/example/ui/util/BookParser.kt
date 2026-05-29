@@ -532,34 +532,86 @@ object BookParser {
         
         // 1. Process Chapter TOC items
         for (item in chapters) {
-            if (item.fragment.isNotEmpty()) {
-                val anchor = item.fragment
-                val idPattern = Regex("(<[^>]+?\\b(?:id|name|xml:id)\\s*=\\s*[\"']" + Regex.escape(anchor) + "[\"'][^>]*>)")
+            val anchor = item.fragment.trim()
+            var injected = false
+            if (anchor.isNotEmpty()) {
+                val escapedAnchor = Regex.escape(anchor)
+                val idPattern = Regex(
+                    "(<[^>]+?\\b(?:id|name|xml:id)\\s*=\\s*[\"']?${escapedAnchor}[\"']?[^>]*>)",
+                    RegexOption.IGNORE_CASE
+                )
+                
                 if (idPattern.containsMatchIn(updatedHtml)) {
                     updatedHtml = idPattern.replace(updatedHtml) { match ->
                         "\n\n# ${item.title}\n\n" + match.value
                     }
+                    injected = true
                 } else {
-                    updatedHtml = "\n\n# ${item.title}\n\n" + updatedHtml
+                    // Fallback search
+                    val lowercaseHtml = updatedHtml.lowercase()
+                    val targetAttrValueMarked = "=\"${anchor.lowercase()}\""
+                    val targetAttrValueMarkedSingle = "='${anchor.lowercase()}'"
+                    val targetAttrValueMarkedRaw = "=${anchor.lowercase()}"
+                    
+                    var index = lowercaseHtml.indexOf(targetAttrValueMarked)
+                    if (index == -1) index = lowercaseHtml.indexOf(targetAttrValueMarkedSingle)
+                    if (index == -1) index = lowercaseHtml.indexOf(targetAttrValueMarkedRaw)
+                    
+                    if (index != -1) {
+                        val startTagPos = updatedHtml.lastIndexOf('<', index)
+                        if (startTagPos != -1) {
+                            updatedHtml = updatedHtml.substring(0, startTagPos) +
+                                    "\n\n# ${item.title}\n\n" +
+                                    updatedHtml.substring(startTagPos)
+                            injected = true
+                        }
+                    }
                 }
-            } else {
+            }
+            if (!injected) {
                 updatedHtml = "\n\n# ${item.title}\n\n" + updatedHtml
             }
         }
 
         // 2. Process Subheading TOC items
         for (item in subheadings) {
-            if (item.fragment.isNotEmpty()) {
-                val anchor = item.fragment
-                val idPattern = Regex("(<[^>]+?\\b(?:id|name|xml:id)\\s*=\\s*[\"']" + Regex.escape(anchor) + "[\"'][^>]*>)")
+            val anchor = item.fragment.trim()
+            var injected = false
+            if (anchor.isNotEmpty()) {
+                val escapedAnchor = Regex.escape(anchor)
+                val idPattern = Regex(
+                    "(<[^>]+?\\b(?:id|name|xml:id)\\s*=\\s*[\"']?${escapedAnchor}[\"']?[^>]*>)",
+                    RegexOption.IGNORE_CASE
+                )
+                
                 if (idPattern.containsMatchIn(updatedHtml)) {
                     updatedHtml = idPattern.replace(updatedHtml) { match ->
                         "\n\n## ${item.title}\n\n" + match.value
                     }
+                    injected = true
                 } else {
-                    updatedHtml = updatedHtml + "\n\n## ${item.title}\n\n"
+                    // Fallback search
+                    val lowercaseHtml = updatedHtml.lowercase()
+                    val targetAttrValueMarked = "=\"${anchor.lowercase()}\""
+                    val targetAttrValueMarkedSingle = "='${anchor.lowercase()}'"
+                    val targetAttrValueMarkedRaw = "=${anchor.lowercase()}"
+                    
+                    var index = lowercaseHtml.indexOf(targetAttrValueMarked)
+                    if (index == -1) index = lowercaseHtml.indexOf(targetAttrValueMarkedSingle)
+                    if (index == -1) index = lowercaseHtml.indexOf(targetAttrValueMarkedRaw)
+                    
+                    if (index != -1) {
+                        val startTagPos = updatedHtml.lastIndexOf('<', index)
+                        if (startTagPos != -1) {
+                            updatedHtml = updatedHtml.substring(0, startTagPos) +
+                                    "\n\n## ${item.title}\n\n" +
+                                    updatedHtml.substring(startTagPos)
+                            injected = true
+                        }
+                    }
                 }
-            } else {
+            }
+            if (!injected) {
                 updatedHtml = updatedHtml + "\n\n## ${item.title}\n\n"
             }
         }

@@ -62,6 +62,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     val activeProfile: StateFlow<MixProfile> = _activeProfile.asStateFlow()
 
+    // --- Book Importing Status Controls ---
+    private val _isBookImporting = MutableStateFlow(false)
+    val isBookImporting: StateFlow<Boolean> = _isBookImporting.asStateFlow()
+
+    private val _bookImportStatus = MutableStateFlow("")
+    val bookImportStatus: StateFlow<String> = _bookImportStatus.asStateFlow()
+
+    private val _bookImportError = MutableStateFlow<String?>(null)
+    val bookImportError: StateFlow<String?> = _bookImportError.asStateFlow()
+
+    fun clearBookImportError() {
+        _bookImportError.value = null
+    }
+
     init {
         _customProfiles.value = loadCustomProfilesFromPrefs()
         _activeProfile.value = retrieveProfileById(_activeProfileId.value)
@@ -190,26 +204,77 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun importBook(title: String, author: String, fileType: String, content: String, filePath: String = "") {
+    fun importBook(title: String, author: String, fileType: String, content: String, filePath: String = "", uri: android.net.Uri? = null) {
         val classId = _selectedClassId.value ?: return
-        val finalPath = if (filePath.isNotEmpty()) filePath else "assets/$title"
+        _isBookImporting.value = true
+        _bookImportStatus.value = "Starting book processing..."
+        _bookImportError.value = null
+
         viewModelScope.launch {
-            importBookUseCase.execute(
-                classId = classId,
-                title = title,
-                author = author,
-                fileType = fileType,
-                filePath = finalPath,
-                rawContent = content,
-                inputStreamProvider = {
-                    if (fileType == "EPUB") {
-                        val file = java.io.File(finalPath)
-                        if (file.exists() && file.isFile) {
-                            file.inputStream()
-                        } else null
-                    } else null
+            try {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    var finalPath = if (filePath.isNotEmpty()) filePath else "assets/$title"
+                    var finalContent = content
+
+                    // If file is passed via Uri, copy or parse it in the background
+                    if (uri != null) {
+                        if (fileType == "EPUB") {
+                            _bookImportStatus.value = "Copying EPUB to local storage..."
+                            val booksDir = java.io.File(getApplication<Application>().filesDir, "books")
+                            if (!booksDir.exists()) booksDir.mkdirs()
+                            val destinationFile = java.io.File(booksDir, "${java.util.UUID.randomUUID()}.epub")
+                            getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
+                                destinationFile.outputStream().use { output ->
+                                    input.copyTo(output)
+                                }
+                            }
+                            finalPath = destinationFile.absolutePath
+                            finalContent = ""
+                        } else {
+                            _bookImportStatus.value = "Reading document..."
+                            val parsed = when (fileType) {
+                                "PDF" -> {
+                                    val stream = getApplication<Application>().contentResolver.openInputStream(uri)
+                                        ?: throw java.io.FileNotFoundException("Could not open PDF stream")
+                                    com.example.ui.util.BookParser.parsePdf(getApplication(), stream)
+                                }
+                                else -> {
+                                    getApplication<Application>().contentResolver.openInputStream(uri)?.use { stream ->
+                                        stream.bufferedReader(Charsets.UTF_8).readText()
+                                    } ?: ""
+                                }
+                            }
+                            finalContent = parsed
+                            finalPath = "assets/$title"
+                        }
+                    }
+
+                    _bookImportStatus.value = "Parsing structure & splitting sentences..."
+                    
+                    importBookUseCase.execute(
+                        classId = classId,
+                        title = title,
+                        author = author,
+                        fileType = fileType,
+                        filePath = finalPath,
+                        rawContent = finalContent,
+                        inputStreamProvider = {
+                            if (fileType == "EPUB") {
+                                val file = java.io.File(finalPath)
+                                if (file.exists() && file.isFile) {
+                                    file.inputStream()
+                                } else null
+                            } else null
+                        }
+                    )
                 }
-            )
+                _bookImportStatus.value = "Import completed successfully!"
+            } catch (e: Exception) {
+                e.printStackTrace()
+                _bookImportError.value = "Error: " + (e.localizedMessage ?: "Parsing & storing book chapters failed.")
+            } finally {
+                _isBookImporting.value = false
+            }
         }
     }
 

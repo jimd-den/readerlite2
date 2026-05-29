@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.ui.zIndex
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
 import android.net.Uri
@@ -73,12 +74,14 @@ fun MainAppScreen(
     var fileType by remember { mutableStateOf("EPUB") } // "EPUB", "PDF", "TXT"
     var textContent by remember { mutableStateOf("") }
     var epubLocalPath by remember { mutableStateOf("") }
+    var selectedFileUri by remember { mutableStateOf<android.net.Uri?>(null) }
 
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
             try {
+                selectedFileUri = uri
                 // Extract filename as default book title
                 var displayName = "Imported Document"
                 val cursor = context.contentResolver.query(uri, null, null, null, null)
@@ -92,39 +95,22 @@ fun MainAppScreen(
                 }
                 
                 val extension = if (displayName.contains(".")) displayName.substringAfterLast(".").uppercase() else "TXT"
-                bookTitle = displayName.replace(Regex("\\.[a-zA-Z0-9]+$"), "")
+                val rawTitleBase = displayName.replace(Regex("\\.[a-zA-Z0-9]+$"), "")
+                bookTitle = rawTitleBase
+                    .replace("_", " ")
+                    .replace("-", " ")
+                    .trim()
+                    .split(" ")
+                    .filter { it.isNotEmpty() }
+                    .joinToString(" ") { word ->
+                        word.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+                    }
                 bookAuthor = "Local Importer"
                 fileType = if (extension in listOf("EPUB", "PDF", "TXT")) extension else "TXT"
                 
-                // Track local path for EPUB / Parse content for other types
-                var localPath = ""
-                val parsedText = when (fileType) {
-                    "EPUB" -> {
-                        val booksDir = java.io.File(context.filesDir, "books")
-                        if (!booksDir.exists()) booksDir.mkdirs()
-                        val destinationFile = java.io.File(booksDir, "${java.util.UUID.randomUUID()}.epub")
-                        context.contentResolver.openInputStream(uri)?.use { input ->
-                            destinationFile.outputStream().use { output ->
-                                input.copyTo(output)
-                            }
-                        }
-                        localPath = destinationFile.absolutePath
-                        "" // Skip huge plain text parsing in memory
-                    }
-                    "PDF" -> {
-                        context.contentResolver.openInputStream(uri)?.use { stream ->
-                            com.example.ui.util.BookParser.parsePdf(context, stream)
-                        } ?: ""
-                    }
-                    else -> {
-                        context.contentResolver.openInputStream(uri)?.use { stream ->
-                            stream.bufferedReader(Charsets.UTF_8).readText()
-                        } ?: ""
-                    }
-                }
-                
-                textContent = parsedText
-                epubLocalPath = localPath
+                // Track selected file via uri, clear previous texts in preparation for background loading
+                textContent = ""
+                epubLocalPath = ""
                 showImportBookDialog = true
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -133,6 +119,10 @@ fun MainAppScreen(
     }
 
     // Observers
+    val isBookImporting by viewModel.isBookImporting.collectAsState()
+    val bookImportStatus by viewModel.bookImportStatus.collectAsState()
+    val bookImportError by viewModel.bookImportError.collectAsState()
+
     val classes by viewModel.classes.collectAsState()
     val books by viewModel.books.collectAsState()
     val chapters by viewModel.chapters.collectAsState()
@@ -254,6 +244,125 @@ fun MainAppScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
+            // Floating background upload / process cue
+            AnimatedVisibility(
+                visible = isBookImporting,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically(),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .padding(16.dp)
+                    .zIndex(10f)
+            ) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(24.dp),
+                                strokeWidth = 2.5.dp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Column {
+                                Text(
+                                    text = "Processing Reading Material...",
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp
+                                )
+                                Text(
+                                    text = bookImportStatus,
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                                )
+                            }
+                        }
+                        LinearProgressIndicator(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp)),
+                            color = MaterialTheme.colorScheme.primary,
+                            trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                        )
+                    }
+                }
+            }
+
+            // Floating error alert banner
+            AnimatedVisibility(
+                visible = bookImportError != null,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically(),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .padding(16.dp)
+                    .zIndex(10f)
+            ) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 6.dp),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Import Error Icon",
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(28.dp)
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Import Failed",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            Text(
+                                text = bookImportError ?: "",
+                                fontSize = 12.sp,
+                                lineHeight = 16.sp
+                            )
+                        }
+                        IconButton(
+                            onClick = { viewModel.clearBookImportError() }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Dismiss error",
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
             when (currentScreen) {
                 is ScreenState.ClassSelect -> {
                     ClassDashboardScreen(
@@ -488,7 +597,14 @@ fun MainAppScreen(
                 Button(
                     onClick = {
                         if (bookTitle.isNotBlank()) {
-                            viewModel.importBook(bookTitle, bookAuthor, fileType, textContent, filePath = epubLocalPath)
+                            viewModel.importBook(
+                                title = bookTitle,
+                                author = bookAuthor,
+                                fileType = fileType,
+                                content = textContent,
+                                filePath = epubLocalPath,
+                                uri = selectedFileUri
+                            )
                             showImportBookDialog = false
                         }
                     },
