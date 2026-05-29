@@ -1,5 +1,6 @@
 package com.example.data.repository
 
+import android.util.Log
 import com.example.data.db.*
 import com.example.domain.model.*
 import com.example.domain.repository.StudyRepository
@@ -78,7 +79,50 @@ class StudyRepositoryImpl(
     ): String {
         val bookId = UUID.randomUUID().toString()
 
-        // 1. Check if we should generate a high-quality academic guide or use the parsed text
+        if (fileType == "EPUB") {
+            val localFile = java.io.File(filePath)
+            if (localFile.exists() && localFile.isFile) {
+                try {
+                    val epubResult = com.example.ui.util.BookParser.parseEpubStructured(localFile.inputStream(), bookId)
+                    
+                    val finalTitle = if (!epubResult.title.isNullOrEmpty()) epubResult.title else title
+                    val finalAuthor = if (!epubResult.author.isNullOrEmpty()) epubResult.author else author.ifEmpty { "Academic Author" }
+                    
+                    val chaptersList = epubResult.chapters.mapIndexed { index, parsedCh ->
+                        ChapterEntity(
+                            id = "${bookId}_ch_${index}",
+                            bookId = bookId,
+                            title = parsedCh.title,
+                            orderIndex = index,
+                            isSubchapter = parsedCh.isSubchapter,
+                            parentTitle = parsedCh.parentTitle
+                        )
+                    }
+
+                    // Persist structured EPUB directly to Room
+                    bookDao.insertBook(
+                        BookEntity(
+                            id = bookId,
+                            classId = classId,
+                            title = finalTitle,
+                            author = finalAuthor,
+                            fileType = fileType,
+                            filePath = filePath,
+                            totalChapters = chaptersList.size,
+                            createdAt = System.currentTimeMillis()
+                        )
+                    )
+                    chapterDao.insertChapters(chaptersList)
+                    sentenceDao.insertSentences(epubResult.sentences)
+
+                    return bookId
+                } catch (e: Exception) {
+                    Log.e("StudyRepositoryImpl", "Error parsing structured EPUB on import", e)
+                }
+            }
+        }
+
+        // 1. Fallback / Standard TXT and PDF flow: Check if we should generate a high-quality academic guide or use the parsed text
         val contentToParse = if (rawContent.trim().isEmpty()) {
             getDemoBookContent(title)
         } else {
@@ -102,7 +146,9 @@ class StudyRepositoryImpl(
                         id = "${bookId}_ch_${currentChapterIndex}",
                         bookId = bookId,
                         title = currentChapterTitle,
-                        orderIndex = currentChapterIndex
+                        orderIndex = currentChapterIndex,
+                        isSubchapter = false,
+                        parentTitle = null
                     )
                 )
             }
@@ -173,7 +219,9 @@ class StudyRepositoryImpl(
                     id = "${bookId}_ch_0",
                     bookId = bookId,
                     title = "Main Text",
-                    orderIndex = 0
+                    orderIndex = 0,
+                    isSubchapter = false,
+                    parentTitle = null
                 )
             )
         }
@@ -203,7 +251,7 @@ class StudyRepositoryImpl(
 
     override fun getChaptersForBook(bookId: String): Flow<List<Chapter>> {
         return chapterDao.getChaptersForBook(bookId).map { entities ->
-            entities.map { Chapter(it.id, it.bookId, it.title, it.orderIndex) }
+            entities.map { Chapter(it.id, it.bookId, it.title, it.orderIndex, it.isSubchapter, it.parentTitle) }
         }
     }
 

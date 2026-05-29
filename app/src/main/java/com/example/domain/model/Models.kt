@@ -22,7 +22,9 @@ data class Chapter(
     val id: String,
     val bookId: String,
     val title: String,
-    val orderIndex: Int
+    val orderIndex: Int,
+    val isSubchapter: Boolean = false,
+    val parentTitle: String? = null
 )
 
 data class Sentence(

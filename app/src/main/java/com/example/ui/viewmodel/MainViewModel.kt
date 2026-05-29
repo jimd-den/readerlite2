@@ -189,7 +189,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun importBook(title: String, author: String, fileType: String, content: String) {
+    fun importBook(title: String, author: String, fileType: String, content: String, filePath: String = "") {
         val classId = _selectedClassId.value ?: return
         viewModelScope.launch {
             repository.importBook(
@@ -197,7 +197,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 title = title,
                 author = author,
                 fileType = fileType,
-                filePath = "assets/$title",
+                filePath = if (filePath.isNotEmpty()) filePath else "assets/$title",
                 rawContent = content
             )
         }

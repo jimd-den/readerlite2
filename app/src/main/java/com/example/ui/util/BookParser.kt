@@ -14,205 +14,65 @@ import java.util.zip.ZipInputStream
 object BookParser {
     private const val TAG = "BookParser"
 
-    fun parseEpub(inputStream: InputStream): String {
-        val byteArr = try {
-            inputStream.readBytes()
-        } catch (e: Exception) {
-            e.printStackTrace()
-            return "Error reading EPUB bytes"
-        }
+    data class TocItem(
+        val title: String,
+        val zipPath: String,
+        val fragment: String,
+        val originalHref: String,
+        val isSubchapter: Boolean = false,
+        val parentTitle: String? = null
+    )
 
-        val zipMap = mutableMapOf<String, ByteArray>()
-        try {
-            val zipStream = ZipInputStream(byteArr.inputStream())
-            var entry = zipStream.nextEntry
-            while (entry != null) {
-                if (!entry.isDirectory) {
-                    zipMap[entry.name] = zipStream.readBytes()
-                }
-                zipStream.closeEntry()
-                entry = zipStream.nextEntry
-            }
-            zipStream.close()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error loading EPUB zip in memory", e)
-            return "Error reading EPUB contents"
-        }
-
-        if (zipMap.isEmpty()) {
-            return "Empty EPUB file (no contents)"
-        }
-
-        // Normalize zip map keys to allow easy lookup
-        val normalizedZipMap = zipMap.mapKeys { (key, _) ->
-            key.lowercase().replace('\\', '/').replace("//", "/").trimStart('/')
-        }
-
-        // Find the OPF file (metadata defining packaging and reading layout)
-        val opfEntry = normalizedZipMap.entries.find { it.key.endsWith(".opf") }
-        val contentBuilder = StringBuilder()
-
-        var opfParsedSuccessfully = false
-
-        if (opfEntry != null) {
-            val opfPath = opfEntry.key
-            val opfFolderPrefix = if (opfPath.contains("/")) opfPath.substringBeforeLast("/") + "/" else ""
-            val opfXmlStr = String(opfEntry.value, Charsets.UTF_8)
-            
-            // Extract manifest catalog and spine sequential order
-            val manifest = mutableMapOf<String, String>() // id -> href xml ref
-            val spine = mutableListOf<String>() // idref ordered list
-
-            try {
-                val parser = Xml.newPullParser()
-                parser.setInput(opfXmlStr.reader())
-                var eventType = parser.eventType
-                while (eventType != XmlPullParser.END_DOCUMENT) {
-                    val rawName = parser.name
-                    if (rawName != null) {
-                        val name = rawName.lowercase()
-                        if (eventType == XmlPullParser.START_TAG) {
-                            if (name == "item" || name.endsWith(":item")) {
-                                var id = ""
-                                var href = ""
-                                for (i in 0 until parser.attributeCount) {
-                                    val attrName = parser.getAttributeName(i).lowercase()
-                                    if (attrName == "id") {
-                                        id = parser.getAttributeValue(i) ?: ""
-                                    } else if (attrName == "href") {
-                                        href = parser.getAttributeValue(i) ?: ""
-                                    }
-                                }
-                                if (id.isNotEmpty() && href.isNotEmpty()) {
-                                    manifest[id] = href
-                                }
-                            } else if (name == "itemref" || name.endsWith(":itemref")) {
-                                var idref = ""
-                                for (i in 0 until parser.attributeCount) {
-                                    if (parser.getAttributeName(i).lowercase() == "idref") {
-                                        idref = parser.getAttributeValue(i) ?: ""
-                                        break
-                                    }
-                                }
-                                if (idref.isNotEmpty()) {
-                                    spine.add(idref)
-                                }
-                            }
-                        }
-                    }
-                    eventType = parser.next()
-                }
-                Log.d(TAG, "Parsed OPF xml metadata success. Spine elements: ${spine.size}")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error in OPF reader xml iteration parsing", e)
-            }
-
-            // Parse NCX Table of Contents files for pristine chapter mapping
-            val ncxChapters = mutableSetOf<String>()
-            val ncxSubheadings = mutableSetOf<String>()
-            val fileToChapterMap = mutableMapOf<String, String>()
-
-            val ncxEntry = normalizedZipMap.entries.find { it.key.endsWith(".ncx") }
-            if (ncxEntry != null) {
-                try {
-                    val ncxXml = String(ncxEntry.value, Charsets.UTF_8)
-                    parseNcx(ncxXml, ncxChapters, ncxSubheadings, fileToChapterMap)
-                    Log.d(TAG, "Parsed NCX TOC. Mapped: ${fileToChapterMap.size}")
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error reading NCX file", e)
-                }
-            }
-
-            // Extract each spine resource content file sequentially in linear reading sequence!
-            if (spine.isNotEmpty()) {
-                var contentsSuccessfullyTranscribed = 0
-                for (idref in spine) {
-                    val relativeHref = manifest[idref] ?: continue
-                    
-                    // Construct and normalize absolute path inside zip resource file system
-                    val entryPath = (opfFolderPrefix + relativeHref).lowercase()
-                        .replace('\\', '/').replace("//", "/").trimStart('/')
-                    
-                    val fileBytes = normalizedZipMap[entryPath] ?: continue
-                    val fileContent = String(fileBytes, Charsets.UTF_8)
-                    val textOnly = stripHtml(fileContent, ncxChapters, ncxSubheadings)
-                    
-                    if (textOnly.isNotBlank()) {
-                        val simpleName = entryPath.substringAfterLast("/").lowercase().trim()
-                        
-                        // Use accurate NCX title mapped filename or beautifully formatted title
-                        val cleanChapterTitle = fileToChapterMap[simpleName] ?: entryPath.substringAfterLast("/").substringBeforeLast(".")
-                            .replace("_", " ")
-                            .replace("-", " ")
-                            .trim()
-                            .replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
-
-                        // Check if the stripped content already starts with a structural header to avoid repeats
-                        val alreadyHasHeaderPrefix = textOnly.startsWith("# ") || textOnly.startsWith("## ")
-                        
-                        if (!alreadyHasHeaderPrefix) {
-                            contentBuilder.append("\n# ").append(cleanChapterTitle).append("\n\n")
-                        }
-                        contentBuilder.append(textOnly).append("\n")
-                        contentsSuccessfullyTranscribed++
-                    }
-                }
-                if (contentsSuccessfullyTranscribed > 0) {
-                    opfParsedSuccessfully = true
-                }
-            }
-        }
-
-        // Alphabetical markup content fallback if OPF parsing failed or spine content is empty
-        if (!opfParsedSuccessfully) {
-            Log.w(TAG, "Fallback to alphabetical physical parsing.")
-            val textBlocks = normalizedZipMap.entries
-                .filter { (key, _) ->
-                    (key.endsWith(".xhtml") || key.endsWith(".html") || key.endsWith(".htm") || key.endsWith(".xml")) &&
-                    !key.contains("container.xml") && !key.contains("toc.ncx") && !key.contains("content.opf") && !key.contains("style")
-                }
-                .sortedBy { it.key }
-
-            val genericChapters = mutableSetOf<String>()
-            val genericSubheadings = mutableSetOf<String>()
-
-            for ((key, byteData) in textBlocks) {
-                val fileContent = String(byteData, Charsets.UTF_8)
-                val textOnly = stripHtml(fileContent, genericChapters, genericSubheadings)
-                if (textOnly.isNotBlank()) {
-                    val cleanChapterTitle = key.substringAfterLast("/").substringBeforeLast(".")
-                        .replace("_", " ")
-                        .replace("-", " ")
-                        .trim()
-                        .replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
-
-                    if (!textOnly.startsWith("# ") && !textOnly.startsWith("## ")) {
-                        contentBuilder.append("\n# ").append(cleanChapterTitle).append("\n\n")
-                    }
-                    contentBuilder.append(textOnly).append("\n")
-                }
-            }
-        }
-
-        return contentBuilder.toString()
+    private fun getAbsoluteZipPath(relativeHref: String, sourceFilePath: String): String {
+        val folder = if (sourceFilePath.contains("/")) sourceFilePath.substringBeforeLast("/") + "/" else ""
+        val combinedAndNormalized = (folder + relativeHref).lowercase()
+            .replace('\\', '/').replace("//", "/").trimStart('/')
+        return combinedAndNormalized.substringBefore("#")
     }
 
-    private fun parseNcx(
-        xmlContent: String, 
-        chapters: MutableSet<String>, 
-        subheadings: MutableSet<String>,
-        fileToChapterMap: MutableMap<String, String>
-    ) {
+    private fun getFragment(href: String): String {
+        return href.substringAfter("#", "")
+    }
+
+    private fun cleanForMatch(text: String): String {
+        return text.lowercase().replace(Regex("[^a-z0-9]"), "")
+    }
+
+    private fun parseEpub3Nav(navXml: String, navPath: String): List<TocItem> {
+        val items = mutableListOf<TocItem>()
+        try {
+            val navRegex = Regex("<nav[^>]*epub:type=[\"']toc[\"'][^>]*>(.*?)</nav>", RegexOption.DOT_MATCHES_ALL)
+            val navMatch = navRegex.find(navXml)
+            val contentToParse = navMatch?.groups?.get(1)?.value ?: navXml
+            
+            val aTagRegex = Regex("<a\\b[^>]*href\\s*=\\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", RegexOption.DOT_MATCHES_ALL)
+            val matches = aTagRegex.findAll(contentToParse)
+            for (match in matches) {
+                val href = match.groups[1]?.value ?: continue
+                val rawTitle = match.groups[2]?.value ?: ""
+                val cleanTitle = rawTitle.replace("<[^>]*>".toRegex(), "").trim()
+                
+                val zipPath = getAbsoluteZipPath(href, navPath)
+                val fragment = getFragment(href)
+                items.add(TocItem(cleanTitle, zipPath, fragment, href))
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parsing EPUB 3 Nav file", e)
+        }
+        return items
+    }
+
+    private fun parseEpub2Ncx(ncxXml: String, ncxPath: String): List<TocItem> {
+        val items = mutableListOf<TocItem>()
         try {
             val parser = Xml.newPullParser()
-            parser.setInput(xmlContent.reader())
+            parser.setInput(ncxXml.reader())
             var eventType = parser.eventType
             
             var currentNavPointDepth = 0
             var inLabelText = false
             val textBuilder = StringBuilder()
 
-            // Depth tracking stacks to avoid nested navPoint override issues
             val depthTitles = Array(32) { "" }
             val depthSrcs = Array(32) { "" }
 
@@ -259,17 +119,13 @@ object BookParser {
                                 val title = depthTitles[currentNavPointDepth]
                                 val src = depthSrcs[currentNavPointDepth]
                                 if (title.isNotEmpty()) {
-                                    if (currentNavPointDepth == 1) {
-                                        chapters.add(title)
-                                        if (src.isNotEmpty()) {
-                                            val cleanFile = src.substringBefore("#").substringAfterLast("/").lowercase().trim()
-                                            if (cleanFile.isNotEmpty()) {
-                                                fileToChapterMap[cleanFile] = title
-                                            }
-                                        }
-                                    } else {
-                                        subheadings.add(title)
-                                    }
+                                    val zipPath = getAbsoluteZipPath(src, ncxPath)
+                                    val fragment = getFragment(src)
+                                    val isSubch = currentNavPointDepth > 1
+                                    val parentT = if (isSubch && currentNavPointDepth - 1 < 32) {
+                                        depthTitles[currentNavPointDepth - 1]
+                                    } else null
+                                    items.add(TocItem(title, zipPath, fragment, src, isSubch, parentT))
                                 }
                             }
                             currentNavPointDepth--
@@ -279,8 +135,649 @@ object BookParser {
                 eventType = parser.next()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "NCX PullParser exception: ", e)
+            Log.e(TAG, "Error parsing NCX", e)
         }
+        return items
+    }
+
+    data class ParsedChapter(
+        val title: String,
+        val isSubchapter: Boolean,
+        val parentTitle: String?
+    )
+
+    data class ParsedEpubResult(
+        val title: String?,
+        val author: String?,
+        val chapters: List<ParsedChapter>,
+        val sentences: List<com.example.data.db.SentenceEntity>
+    )
+
+    fun parseEpubStructured(inputStream: InputStream, bookId: String): ParsedEpubResult {
+        val byteArr = try {
+            inputStream.readBytes()
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return ParsedEpubResult(null, null, emptyList(), emptyList())
+        }
+
+        val zipMap = mutableMapOf<String, ByteArray>()
+        try {
+            val zipStream = ZipInputStream(byteArr.inputStream())
+            var entry = zipStream.nextEntry
+            while (entry != null) {
+                if (!entry.isDirectory) {
+                    zipMap[entry.name] = zipStream.readBytes()
+                }
+                zipStream.closeEntry()
+                entry = zipStream.nextEntry
+            }
+            zipStream.close()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error loading EPUB zip in memory", e)
+            return ParsedEpubResult(null, null, emptyList(), emptyList())
+        }
+
+        if (zipMap.isEmpty()) {
+            return ParsedEpubResult(null, null, emptyList(), emptyList())
+        }
+
+        val normalizedZipMap = zipMap.mapKeys { (key, _) ->
+            key.lowercase().replace('\\', '/').replace("//", "/").trimStart('/')
+        }
+
+        val opfEntry = normalizedZipMap.entries.find { it.key.endsWith(".opf") }
+        
+        var epubVersion = "2.0"
+        val manifest = mutableMapOf<String, String>()
+        val spine = mutableListOf<String>()
+        var navHref: String? = null
+        var tocNcxHref: String? = null
+        var opfFolderPrefix = ""
+        var extractedTitle: String? = null
+        var extractedAuthor: String? = null
+
+        if (opfEntry != null) {
+            val opfPath = opfEntry.key
+            opfFolderPrefix = if (opfPath.contains("/")) opfPath.substringBeforeLast("/") + "/" else ""
+            val opfXmlStr = String(opfEntry.value, Charsets.UTF_8)
+
+            try {
+                val parser = Xml.newPullParser()
+                parser.setInput(opfXmlStr.reader())
+                var eventType = parser.eventType
+                while (eventType != XmlPullParser.END_DOCUMENT) {
+                    val rawName = parser.name
+                    val name = rawName?.lowercase()
+                    if (eventType == XmlPullParser.START_TAG) {
+                        if (name == "package" || name?.endsWith(":package") == true) {
+                            for (i in 0 until parser.attributeCount) {
+                                if (parser.getAttributeName(i).lowercase() == "version") {
+                                    epubVersion = parser.getAttributeValue(i) ?: "2.0"
+                                    break
+                                }
+                            }
+                        } else if (name == "title" || name?.endsWith(":title") == true) {
+                            extractedTitle = parser.nextText()
+                        } else if (name == "creator" || name?.endsWith(":creator") == true) {
+                            extractedAuthor = parser.nextText()
+                        } else if (name == "item" || name?.endsWith(":item") == true) {
+                            var id = ""
+                            var href = ""
+                            var properties = ""
+                            for (i in 0 until parser.attributeCount) {
+                                val attrName = parser.getAttributeName(i).lowercase()
+                                if (attrName == "id") {
+                                    id = parser.getAttributeValue(i) ?: ""
+                                } else if (attrName == "href") {
+                                    href = parser.getAttributeValue(i) ?: ""
+                                } else if (attrName == "properties") {
+                                    properties = parser.getAttributeValue(i) ?: ""
+                                }
+                            }
+                            if (id.isNotEmpty() && href.isNotEmpty()) {
+                                manifest[id.lowercase().trim()] = href.trim()
+                                if (properties == "nav" || properties.contains("nav")) {
+                                    navHref = href
+                                }
+                                if (href.endsWith(".ncx")) {
+                                    tocNcxHref = href
+                                }
+                            }
+                        } else if (name == "itemref" || name?.endsWith(":itemref") == true) {
+                            var idref = ""
+                            for (i in 0 until parser.attributeCount) {
+                                if (parser.getAttributeName(i).lowercase() == "idref") {
+                                    idref = parser.getAttributeValue(i) ?: ""
+                                    break
+                                }
+                            }
+                            if (idref.isNotEmpty()) {
+                                spine.add(idref.lowercase().trim())
+                            }
+                        }
+                    }
+                    eventType = parser.next()
+                }
+                Log.d(TAG, "Parsed OPF xml in parseEpubStructured. Title: $extractedTitle, Creator: $extractedAuthor, Version: $epubVersion, Spine: ${spine.size}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error parsing OPF metadata", e)
+            }
+        }
+
+        val unifiedTocList = mutableListOf<TocItem>()
+
+        var parsedViaEpub3Nav = false
+        val resolvedNavHref = navHref ?: manifest.values.find { it.contains("nav.xhtml") || it.contains("toc.xhtml") }
+        if (opfEntry != null && resolvedNavHref != null) {
+            val navPathInZip = (opfFolderPrefix + resolvedNavHref).lowercase()
+                .replace('\\', '/').replace("//", "/").trimStart('/')
+            val navBytes = normalizedZipMap[navPathInZip]
+            if (navBytes != null) {
+                val navXmlStr = String(navBytes, Charsets.UTF_8)
+                val items = parseEpub3Nav(navXmlStr, navPathInZip)
+                if (items.isNotEmpty()) {
+                    unifiedTocList.addAll(items)
+                    parsedViaEpub3Nav = true
+                    Log.d(TAG, "Loaded TOC from EPUB3 Nav document in parseEpubStructured: ${items.size} items")
+                }
+            }
+        }
+
+        if (opfEntry != null && !parsedViaEpub3Nav) {
+            val resolvedNcxHref = tocNcxHref ?: manifest.values.find { it.endsWith(".ncx") }
+            if (resolvedNcxHref != null) {
+                val ncxPathInZip = (opfFolderPrefix + resolvedNcxHref).lowercase()
+                    .replace('\\', '/').replace("//", "/").trimStart('/')
+                val ncxBytes = normalizedZipMap[ncxPathInZip]
+                if (ncxBytes != null) {
+                    val ncxXmlStr = String(ncxBytes, Charsets.UTF_8)
+                    val items = parseEpub2Ncx(ncxXmlStr, ncxPathInZip)
+                    if (items.isNotEmpty()) {
+                        unifiedTocList.addAll(items)
+                        Log.d(TAG, "Loaded TOC from EPUB2 NCX in parseEpubStructured: ${items.size} items")
+                    }
+                }
+            }
+        }
+
+        if (unifiedTocList.isEmpty()) {
+            val fallbackNcxEntry = normalizedZipMap.entries.find { it.key.endsWith(".ncx") }
+            if (fallbackNcxEntry != null) {
+                try {
+                    val ncxXmlStr = String(fallbackNcxEntry.value, Charsets.UTF_8)
+                    val items = parseEpub2Ncx(ncxXmlStr, fallbackNcxEntry.key)
+                    unifiedTocList.addAll(items)
+                    Log.d(TAG, "Loaded fallback NCX file from ${fallbackNcxEntry.key} in parseEpubStructured: ${items.size} items")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error in nested NCX fallback parsing", e)
+                }
+            }
+        }
+
+        val chaptersList = mutableListOf<ParsedChapter>()
+        val sentencesList = mutableListOf<com.example.data.db.SentenceEntity>()
+        var chapterCounter = 0
+
+        for (idref in spine) {
+            val relativeHref = manifest[idref] ?: continue
+            val entryPath = (opfFolderPrefix + relativeHref).lowercase()
+                .replace('\\', '/').replace("//", "/").trimStart('/')
+            
+            val fileBytes = normalizedZipMap[entryPath]
+            if (fileBytes != null) {
+                val fileContent = String(fileBytes, Charsets.UTF_8)
+                val fileTocItems = unifiedTocList.filter { it.zipPath == entryPath }
+                
+                val firstTocItem = fileTocItems.firstOrNull()
+                val (chapterTitle, isSub, pTitle) = if (firstTocItem != null) {
+                    Triple(firstTocItem.title, firstTocItem.isSubchapter, firstTocItem.parentTitle)
+                } else {
+                    val fallbackTitle = entryPath.substringAfterLast("/").substringBeforeLast(".")
+                        .replace("_", " ")
+                        .replace("-", " ")
+                        .trim()
+                        .replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+                    Triple(fallbackTitle, false, null)
+                }
+
+                val allChaptersSet = fileTocItems.filter { !it.isSubchapter }.map { cleanForMatch(it.title) }.toSet()
+                val allSubheadingsSet = fileTocItems.filter { it.isSubchapter }.map { cleanForMatch(it.title) }.toSet()
+
+                val textOnly = stripHtml(fileContent, allChaptersSet, allSubheadingsSet)
+                if (textOnly.isNotBlank()) {
+                    chaptersList.add(ParsedChapter(chapterTitle, isSub, pTitle))
+
+                    val lines = textOnly.split("\n")
+                    var currentSectionTitle = if (isSub && pTitle != null) pTitle else "Overview"
+                    var sentenceCount = 0
+
+                    for (line in lines) {
+                        val lineTrimmed = line.trim()
+                        if (lineTrimmed.isEmpty()) continue
+
+                        val cleanLine = cleanForMatch(lineTrimmed)
+                        val matchedSubheading = fileTocItems.find { it.isSubchapter && cleanForMatch(it.title) == cleanLine }
+                        
+                        if (matchedSubheading != null) {
+                            currentSectionTitle = matchedSubheading.title
+                            continue
+                        }
+
+                        val sentences = lineTrimmed.split(Regex("(?<=[.!?])\\s+"))
+                        for (sent in sentences) {
+                            val sText = sent.trim()
+                            if (sText.isNotEmpty()) {
+                                sentencesList.add(
+                                    com.example.data.db.SentenceEntity(
+                                        id = "${bookId}_ch_${chapterCounter}_s_${sentenceCount}",
+                                        bookId = bookId,
+                                        chapterIndex = chapterCounter,
+                                        sentenceIndex = sentenceCount,
+                                        text = sText,
+                                        sectionTitle = currentSectionTitle
+                                    )
+                                )
+                                sentenceCount++
+                            }
+                        }
+                    }
+                    chapterCounter++
+                }
+            }
+        }
+
+        return ParsedEpubResult(
+            title = extractedTitle,
+            author = extractedAuthor,
+            chapters = chaptersList,
+            sentences = sentencesList
+        )
+    }
+
+    private fun injectTocHeadings(htmlContent: String, chapters: List<TocItem>, subheadings: List<TocItem>): String {
+        var updatedHtml = htmlContent
+        
+        // 1. Process Chapter TOC items
+        for (item in chapters) {
+            if (item.fragment.isNotEmpty()) {
+                val anchor = item.fragment
+                val idPattern = Regex("(<[^>]+?\\b(?:id|name|xml:id)\\s*=\\s*[\"']" + Regex.escape(anchor) + "[\"'][^>]*>)")
+                if (idPattern.containsMatchIn(updatedHtml)) {
+                    updatedHtml = idPattern.replace(updatedHtml) { match ->
+                        "\n\n# ${item.title}\n\n" + match.value
+                    }
+                } else {
+                    updatedHtml = "\n\n# ${item.title}\n\n" + updatedHtml
+                }
+            } else {
+                updatedHtml = "\n\n# ${item.title}\n\n" + updatedHtml
+            }
+        }
+
+        // 2. Process Subheading TOC items
+        for (item in subheadings) {
+            if (item.fragment.isNotEmpty()) {
+                val anchor = item.fragment
+                val idPattern = Regex("(<[^>]+?\\b(?:id|name|xml:id)\\s*=\\s*[\"']" + Regex.escape(anchor) + "[\"'][^>]*>)")
+                if (idPattern.containsMatchIn(updatedHtml)) {
+                    updatedHtml = idPattern.replace(updatedHtml) { match ->
+                        "\n\n## ${item.title}\n\n" + match.value
+                    }
+                } else {
+                    updatedHtml = updatedHtml + "\n\n## ${item.title}\n\n"
+                }
+            } else {
+                updatedHtml = updatedHtml + "\n\n## ${item.title}\n\n"
+            }
+        }
+        
+        return updatedHtml
+    }
+
+    fun parseEpub(inputStream: InputStream): String {
+        val byteArr = try {
+            inputStream.readBytes()
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return "Error reading EPUB bytes"
+        }
+
+        val zipMap = mutableMapOf<String, ByteArray>()
+        try {
+            val zipStream = ZipInputStream(byteArr.inputStream())
+            var entry = zipStream.nextEntry
+            while (entry != null) {
+                if (!entry.isDirectory) {
+                    zipMap[entry.name] = zipStream.readBytes()
+                }
+                zipStream.closeEntry()
+                entry = zipStream.nextEntry
+            }
+            zipStream.close()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error loading EPUB zip in memory", e)
+            return "Error reading EPUB contents"
+        }
+
+        if (zipMap.isEmpty()) {
+            return "Empty EPUB file (no contents)"
+        }
+
+        // Normalize zip map keys to allow easy lookup
+        val normalizedZipMap = zipMap.mapKeys { (key, _) ->
+            key.lowercase().replace('\\', '/').replace("//", "/").trimStart('/')
+        }
+
+        // Find OPF file
+        val opfEntry = normalizedZipMap.entries.find { it.key.endsWith(".opf") }
+        
+        // Parse OPF structure
+        var epubVersion = "2.0"
+        val manifest = mutableMapOf<String, String>() // id -> href xml ref
+        val spine = mutableListOf<String>() // idref ordered list
+        var navHref: String? = null
+        var tocNcxHref: String? = null
+        var opfFolderPrefix = ""
+
+        if (opfEntry != null) {
+            val opfPath = opfEntry.key
+            opfFolderPrefix = if (opfPath.contains("/")) opfPath.substringBeforeLast("/") + "/" else ""
+            val opfXmlStr = String(opfEntry.value, Charsets.UTF_8)
+
+            try {
+                val parser = Xml.newPullParser()
+                parser.setInput(opfXmlStr.reader())
+                var eventType = parser.eventType
+                while (eventType != XmlPullParser.END_DOCUMENT) {
+                    val rawName = parser.name
+                    val name = rawName?.lowercase()
+                    if (eventType == XmlPullParser.START_TAG) {
+                        if (name == "package" || name?.endsWith(":package") == true) {
+                            for (i in 0 until parser.attributeCount) {
+                                if (parser.getAttributeName(i).lowercase() == "version") {
+                                    epubVersion = parser.getAttributeValue(i) ?: "2.0"
+                                    break
+                                }
+                            }
+                        } else if (name == "item" || name?.endsWith(":item") == true) {
+                            var id = ""
+                            var href = ""
+                            var properties = ""
+                            for (i in 0 until parser.attributeCount) {
+                                val attrName = parser.getAttributeName(i).lowercase()
+                                if (attrName == "id") {
+                                    id = parser.getAttributeValue(i) ?: ""
+                                } else if (attrName == "href") {
+                                    href = parser.getAttributeValue(i) ?: ""
+                                } else if (attrName == "properties") {
+                                    properties = parser.getAttributeValue(i) ?: ""
+                                }
+                            }
+                            if (id.isNotEmpty() && href.isNotEmpty()) {
+                                manifest[id.lowercase().trim()] = href.trim()
+                                if (properties == "nav" || properties.contains("nav")) {
+                                    navHref = href
+                                }
+                                if (href.endsWith(".ncx")) {
+                                    tocNcxHref = href
+                                }
+                            }
+                        } else if (name == "itemref" || name?.endsWith(":itemref") == true) {
+                            var idref = ""
+                            for (i in 0 until parser.attributeCount) {
+                                if (parser.getAttributeName(i).lowercase() == "idref") {
+                                    idref = parser.getAttributeValue(i) ?: ""
+                                    break
+                                }
+                            }
+                            if (idref.isNotEmpty()) {
+                                spine.add(idref.lowercase().trim())
+                            }
+                        }
+                    }
+                    eventType = parser.next()
+                }
+                Log.d(TAG, "Parsed OPF xml. Version: $epubVersion, Spine elements: ${spine.size}, navHref: $navHref")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error parsing OPF metadata", e)
+            }
+        }
+
+        // Unified TOC Items List
+        val unifiedTocList = mutableListOf<TocItem>()
+
+        // 1. Try parsing EPUB 3 Navigation Document first
+        var parsedViaEpub3Nav = false
+        val resolvedNavHref = navHref ?: manifest.values.find { it.contains("nav.xhtml") || it.contains("toc.xhtml") }
+        if (opfEntry != null && resolvedNavHref != null) {
+            val navPathInZip = (opfFolderPrefix + resolvedNavHref).lowercase()
+                .replace('\\', '/').replace("//", "/").trimStart('/')
+            val navBytes = normalizedZipMap[navPathInZip]
+            if (navBytes != null) {
+                val navXmlStr = String(navBytes, Charsets.UTF_8)
+                val items = parseEpub3Nav(navXmlStr, navPathInZip)
+                if (items.isNotEmpty()) {
+                    unifiedTocList.addAll(items)
+                    parsedViaEpub3Nav = true
+                    Log.d(TAG, "Loaded TOC from EPUB3 Nav document: ${items.size} items")
+                }
+            }
+        }
+
+        // 2. Fall back to EPUB 2 NCX file if EPUB 3 parsing wasn't successful
+        if (opfEntry != null && !parsedViaEpub3Nav) {
+            val resolvedNcxHref = tocNcxHref ?: manifest.values.find { it.endsWith(".ncx") }
+            if (resolvedNcxHref != null) {
+                val ncxPathInZip = (opfFolderPrefix + resolvedNcxHref).lowercase()
+                    .replace('\\', '/').replace("//", "/").trimStart('/')
+                val ncxBytes = normalizedZipMap[ncxPathInZip]
+                if (ncxBytes != null) {
+                    val ncxXmlStr = String(ncxBytes, Charsets.UTF_8)
+                    val items = parseEpub2Ncx(ncxXmlStr, ncxPathInZip)
+                    if (items.isNotEmpty()) {
+                        unifiedTocList.addAll(items)
+                        Log.d(TAG, "Loaded TOC from EPUB2 NCX: ${items.size} items")
+                    }
+                }
+            }
+        }
+
+        // Look for other NCX files if still empty
+        if (unifiedTocList.isEmpty()) {
+            val fallbackNcxEntry = normalizedZipMap.entries.find { it.key.endsWith(".ncx") }
+            if (fallbackNcxEntry != null) {
+                try {
+                    val ncxXmlStr = String(fallbackNcxEntry.value, Charsets.UTF_8)
+                    val items = parseEpub2Ncx(ncxXmlStr, fallbackNcxEntry.key)
+                    unifiedTocList.addAll(items)
+                    Log.d(TAG, "Loaded fallback NCX file from ${fallbackNcxEntry.key}: ${items.size} items")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error in nested NCX fallback parsing", e)
+                }
+            }
+        }
+
+        // Classify TOC items into chapters and subheadings based on instruction:
+        // "if it links to the same html it will be a subheading"
+        val seenZipPathsInToc = mutableSetOf<String>()
+        val chaptersMap = mutableMapOf<String, MutableList<TocItem>>() // zipPath -> List of Chapter TOC items
+        val subheadingsMap = mutableMapOf<String, MutableList<TocItem>>() // zipPath -> List of Subheading TOC items
+
+        for (item in unifiedTocList) {
+            val normalizedZipPath = item.zipPath.lowercase().trimStart('/')
+            if (normalizedZipPath !in seenZipPathsInToc) {
+                seenZipPathsInToc.add(normalizedZipPath)
+                chaptersMap.getOrPut(normalizedZipPath) { mutableListOf() }.add(item)
+            } else {
+                subheadingsMap.getOrPut(normalizedZipPath) { mutableListOf() }.add(item)
+            }
+        }
+
+        val allChaptersSet = chaptersMap.values.flatten().map { it.title }.toSet()
+        val allSubheadingsSet = subheadingsMap.values.flatten().map { it.title }.toSet()
+
+        val contentBuilder = StringBuilder()
+
+        // Extract each spine resource content file sequentially in linear reading sequence!
+        if (spine.isNotEmpty()) {
+            for (idref in spine) {
+                val relativeHref = manifest[idref] ?: continue
+                
+                // Construct and normalize absolute path inside zip resource file system
+                val entryPath = (opfFolderPrefix + relativeHref).lowercase()
+                    .replace('\\', '/').replace("//", "/").trimStart('/')
+                
+                val fileBytes = normalizedZipMap[entryPath] ?: continue
+                val fileContent = String(fileBytes, Charsets.UTF_8)
+
+                val chaptersList = chaptersMap[entryPath] ?: emptyList()
+                val subheadingsList = subheadingsMap[entryPath] ?: emptyList()
+
+                // Inject anchors / formatting into HTML directly
+                val modifiedHtml = injectTocHeadings(fileContent, chaptersList, subheadingsList)
+
+                val textOnly = stripHtml(modifiedHtml, allChaptersSet, allSubheadingsSet)
+                
+                if (textOnly.isNotBlank()) {
+                    val processedLines = mutableListOf<String>()
+                    val lines = textOnly.split("\n")
+                    
+                    for (line in lines) {
+                        val lineTrimmed = line.trim()
+                        if (lineTrimmed.isEmpty()) {
+                            processedLines.add("")
+                            continue
+                        }
+                        
+                        // Smart structure conversion based on matched TOC entries for this file
+                        val cleanLine = cleanForMatch(lineTrimmed)
+                        val matchedChapter = chaptersList.find { cleanForMatch(it.title) == cleanLine }
+                        val matchedSubheading = subheadingsList.find { cleanForMatch(it.title) == cleanLine }
+                        
+                        when {
+                            matchedChapter != null -> {
+                                processedLines.add("\n# ${matchedChapter.title}\n")
+                            }
+                            matchedSubheading != null -> {
+                                processedLines.add("\n## ${matchedSubheading.title}\n")
+                            }
+                            else -> {
+                                processedLines.add(line)
+                            }
+                        }
+                    }
+                    
+                    // Fallback heading block: ensure every file has a chapter header
+                    val firstChapterTitle = chaptersList.firstOrNull()?.title ?: entryPath.substringAfterLast("/").substringBeforeLast(".")
+                        .replace("_", " ")
+                        .replace("-", " ")
+                        .trim()
+                        .replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+
+                    // DEDUPLICATION: Remove any duplicate heading in the first 5 lines of the parsed lines
+                    val normalizedFirstChapterTitle = cleanForMatch(firstChapterTitle)
+                    var duplicateIndex = -1
+                    if (normalizedFirstChapterTitle.length > 3) {
+                        var nonSpaceCount = 0
+                        for (i in processedLines.indices) {
+                            val line = processedLines[i].trim()
+                            if (line.isNotEmpty()) {
+                                nonSpaceCount++
+                                if (nonSpaceCount > 5) break
+                                if (line.startsWith("# ") || line.startsWith("## ")) {
+                                    continue
+                                }
+                                val cleanLine = cleanForMatch(line)
+                                if (cleanLine == normalizedFirstChapterTitle || 
+                                    (cleanLine.length > 5 && normalizedFirstChapterTitle.contains(cleanLine)) || 
+                                    (normalizedFirstChapterTitle.length > 5 && cleanLine.contains(normalizedFirstChapterTitle))) {
+                                    duplicateIndex = i
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    if (duplicateIndex != -1) {
+                        processedLines[duplicateIndex] = ""
+                    }
+
+                    var fileText = processedLines.joinToString("\n")
+                    
+                    val startsWithChapterHeader = fileText.trimStart().startsWith("# ")
+                    if (!startsWithChapterHeader) {
+                        fileText = "\n# $firstChapterTitle\n\n" + fileText
+                    }
+
+                    // Replace multiple blank lines with max 2
+                    fileText = fileText.replace("\n\\s*\n\\s*\n+".toRegex(), "\n\n")
+
+                    contentBuilder.append(fileText).append("\n")
+                }
+            }
+        }
+
+        // Alphabetical markup content fallback if OPF parsing failed or spine content is empty
+        if (contentBuilder.isEmpty()) {
+            Log.w(TAG, "Fallback to alphabetical physical parsing.")
+            val textBlocks = normalizedZipMap.entries
+                .filter { (key, _) ->
+                    (key.endsWith(".xhtml") || key.endsWith(".html") || key.endsWith(".htm") || key.endsWith(".xml")) &&
+                    !key.contains("container.xml") && !key.contains("toc.ncx") && !key.contains("content.opf") && !key.contains("style")
+                }
+                .sortedBy { it.key }
+
+            for ((key, byteData) in textBlocks) {
+                val fileContent = String(byteData, Charsets.UTF_8)
+                val textOnly = stripHtml(fileContent, emptySet(), emptySet())
+                if (textOnly.isNotBlank()) {
+                    val cleanChapterTitle = key.substringAfterLast("/").substringBeforeLast(".")
+                        .replace("_", " ")
+                        .replace("-", " ")
+                        .trim()
+                        .replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+
+                    val lines = textOnly.split("\n")
+                    val processedLines = lines.toMutableList()
+
+                    // Deduplicate the title if it repeats in the first 5 lines of plain text
+                    val normalizedTitle = cleanForMatch(cleanChapterTitle)
+                    var duplicateIndex = -1
+                    if (normalizedTitle.length > 3) {
+                        var nonSpaceCount = 0
+                        for (i in processedLines.indices) {
+                            val line = processedLines[i].trim()
+                            if (line.isNotEmpty()) {
+                                nonSpaceCount++
+                                if (nonSpaceCount > 5) break
+                                if (line.startsWith("# ") || line.startsWith("## ")) {
+                                    continue
+                                }
+                                val cleanLine = cleanForMatch(line)
+                                if (cleanLine == normalizedTitle || 
+                                    (cleanLine.length > 5 && normalizedTitle.contains(cleanLine)) || 
+                                    (normalizedTitle.length > 5 && cleanLine.contains(normalizedTitle))) {
+                                    duplicateIndex = i
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    if (duplicateIndex != -1) {
+                        processedLines[duplicateIndex] = ""
+                    }
+
+                    var fileText = processedLines.joinToString("\n")
+
+                    if (!fileText.trimStart().startsWith("# ") && !fileText.trimStart().startsWith("## ")) {
+                        contentBuilder.append("\n# ").append(cleanChapterTitle).append("\n\n")
+                    }
+                    contentBuilder.append(fileText).append("\n")
+                }
+            }
+        }
+
+        return contentBuilder.toString()
     }
 
     fun parsePdf(context: Context, inputStream: InputStream): String {

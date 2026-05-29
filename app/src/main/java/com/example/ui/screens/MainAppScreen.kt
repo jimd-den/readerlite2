@@ -72,6 +72,7 @@ fun MainAppScreen(
     var bookAuthor by remember { mutableStateOf("") }
     var fileType by remember { mutableStateOf("EPUB") } // "EPUB", "PDF", "TXT"
     var textContent by remember { mutableStateOf("") }
+    var epubLocalPath by remember { mutableStateOf("") }
 
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -95,12 +96,20 @@ fun MainAppScreen(
                 bookAuthor = "Local Importer"
                 fileType = if (extension in listOf("EPUB", "PDF", "TXT")) extension else "TXT"
                 
-                // Parse file content based on file type
+                // Track local path for EPUB / Parse content for other types
+                var localPath = ""
                 val parsedText = when (fileType) {
                     "EPUB" -> {
-                        context.contentResolver.openInputStream(uri)?.use { stream ->
-                            com.example.ui.util.BookParser.parseEpub(stream)
-                        } ?: ""
+                        val booksDir = java.io.File(context.filesDir, "books")
+                        if (!booksDir.exists()) booksDir.mkdirs()
+                        val destinationFile = java.io.File(booksDir, "${java.util.UUID.randomUUID()}.epub")
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            destinationFile.outputStream().use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                        localPath = destinationFile.absolutePath
+                        "" // Skip huge plain text parsing in memory
                     }
                     "PDF" -> {
                         context.contentResolver.openInputStream(uri)?.use { stream ->
@@ -115,6 +124,7 @@ fun MainAppScreen(
                 }
                 
                 textContent = parsedText
+                epubLocalPath = localPath
                 showImportBookDialog = true
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -445,23 +455,40 @@ fun MainAppScreen(
                         }
                     }
 
-                    OutlinedTextField(
-                        value = textContent,
-                        onValueChange = { textContent = it },
-                        label = { Text("Write/Paste Content (Optional)") },
-                        placeholder = { Text("Leave blank to autopopulate the textbook section for demo study!") },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(150.dp),
-                        maxLines = 8
-                    )
+                    if (fileType == "EPUB") {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                                .padding(12.dp)
+                        ) {
+                            Text(
+                                text = "📖 EPUB Packaged Document\nReady for database metadata extraction & structuring.",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                fontWeight = FontWeight.Bold,
+                                lineHeight = 16.sp
+                            )
+                        }
+                    } else {
+                        OutlinedTextField(
+                            value = textContent,
+                            onValueChange = { textContent = it },
+                            label = { Text("Write/Paste Content (Optional)") },
+                            placeholder = { Text("Leave blank to autopopulate the textbook section for demo study!") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(150.dp),
+                            maxLines = 8
+                        )
+                    }
                 }
             },
             confirmButton = {
                 Button(
                     onClick = {
                         if (bookTitle.isNotBlank()) {
-                            viewModel.importBook(bookTitle, bookAuthor, fileType, textContent)
+                            viewModel.importBook(bookTitle, bookAuthor, fileType, textContent, filePath = epubLocalPath)
                             showImportBookDialog = false
                         }
                     },
@@ -1063,6 +1090,7 @@ fun SurveyOutlinePane(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .padding(start = if (chapter.isSubchapter) 24.dp else 0.dp)
                     .animateContentSize()
             ) {
                 Row(
@@ -1088,10 +1116,14 @@ fun SurveyOutlinePane(
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Chapter ${chapter.orderIndex + 1}",
+                            text = if (chapter.isSubchapter) {
+                                if (chapter.parentTitle != null) "Subchapter under ${chapter.parentTitle}" else "Subchapter"
+                            } else {
+                                "Chapter ${chapter.orderIndex + 1}"
+                            },
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary,
+                            color = if (chapter.isSubchapter) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary,
                             fontFamily = FontFamily.Monospace
                         )
                         Text(
