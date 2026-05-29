@@ -16,7 +16,7 @@ interface StudyRepository {
         author: String,
         fileType: String,
         filePath: String,
-        rawContent: String // Used to parse headings, outline and sentences
+        structure: EpubStructureDomainModel
     ): String
     suspend fun deleteBook(bookId: String)
 

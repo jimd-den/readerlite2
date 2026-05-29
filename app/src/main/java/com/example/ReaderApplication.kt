@@ -9,6 +9,8 @@ import com.example.domain.repository.StudyRepository
 class ReaderApplication : Application() {
     lateinit var database: AppDatabase
     lateinit var repository: StudyRepository
+    lateinit var epubExtractor: com.example.domain.repository.EpubExtractor
+    lateinit var importBookUseCase: com.example.domain.usecase.ImportBookUseCase
 
     override fun onCreate() {
         super.onCreate()
@@ -19,5 +21,7 @@ class ReaderApplication : Application() {
         ).fallbackToDestructiveMigration().build()
         
         repository = StudyRepositoryImpl(database)
+        epubExtractor = com.example.data.repository.EpubExtractorImpl()
+        importBookUseCase = com.example.domain.usecase.ImportBookUseCase(repository, epubExtractor)
     }
 }

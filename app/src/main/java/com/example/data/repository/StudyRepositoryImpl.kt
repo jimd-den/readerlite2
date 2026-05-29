@@ -75,158 +75,33 @@ class StudyRepositoryImpl(
         author: String,
         fileType: String,
         filePath: String,
-        rawContent: String
+        structure: EpubStructureDomainModel
     ): String {
         val bookId = UUID.randomUUID().toString()
 
-        if (fileType == "EPUB") {
-            val localFile = java.io.File(filePath)
-            if (localFile.exists() && localFile.isFile) {
-                try {
-                    val epubResult = com.example.ui.util.BookParser.parseEpubStructured(localFile.inputStream(), bookId)
-                    
-                    val finalTitle = if (!epubResult.title.isNullOrEmpty()) epubResult.title else title
-                    val finalAuthor = if (!epubResult.author.isNullOrEmpty()) epubResult.author else author.ifEmpty { "Academic Author" }
-                    
-                    val chaptersList = epubResult.chapters.mapIndexed { index, parsedCh ->
-                        ChapterEntity(
-                            id = "${bookId}_ch_${index}",
-                            bookId = bookId,
-                            title = parsedCh.title,
-                            orderIndex = index,
-                            isSubchapter = parsedCh.isSubchapter,
-                            parentTitle = parsedCh.parentTitle
-                        )
-                    }
-
-                    // Persist structured EPUB directly to Room
-                    bookDao.insertBook(
-                        BookEntity(
-                            id = bookId,
-                            classId = classId,
-                            title = finalTitle,
-                            author = finalAuthor,
-                            fileType = fileType,
-                            filePath = filePath,
-                            totalChapters = chaptersList.size,
-                            createdAt = System.currentTimeMillis()
-                        )
-                    )
-                    chapterDao.insertChapters(chaptersList)
-                    sentenceDao.insertSentences(epubResult.sentences)
-
-                    return bookId
-                } catch (e: Exception) {
-                    Log.e("StudyRepositoryImpl", "Error parsing structured EPUB on import", e)
-                }
-            }
-        }
-
-        // 1. Fallback / Standard TXT and PDF flow: Check if we should generate a high-quality academic guide or use the parsed text
-        val contentToParse = if (rawContent.trim().isEmpty()) {
-            getDemoBookContent(title)
-        } else {
-            rawContent
-        }
-
-        // 2. Parse into chapters, subheadings, and sentences
-        val chaptersList = mutableListOf<ChapterEntity>()
-        val sentencesList = mutableListOf<SentenceEntity>()
-
-        val lines = contentToParse.split("\n")
-        var currentChapterIndex = -1
-        var currentChapterTitle = "Introduction"
-        var currentSectionTitle = "Overview"
-        var sentenceCount = 0
-
-        fun saveCurrentChapter() {
-            if (currentChapterIndex >= 0) {
-                chaptersList.add(
-                    ChapterEntity(
-                        id = "${bookId}_ch_${currentChapterIndex}",
-                        bookId = bookId,
-                        title = currentChapterTitle,
-                        orderIndex = currentChapterIndex,
-                        isSubchapter = false,
-                        parentTitle = null
-                    )
-                )
-            }
-        }
-
-        for (line in lines) {
-            val trimmed = line.trim()
-            if (trimmed.isEmpty()) continue
-
-            // Detect Chapters
-            val isChapterLine = (trimmed.startsWith("# ") && trimmed.length < 150) || 
-                                (trimmed.startsWith("Chapter", ignoreCase = true) && trimmed.contains(":") && trimmed.length < 100) || 
-                                (trimmed.matches(Regex("^(CHAPTER|Chapter)\\s+\\d+.*")) && trimmed.length < 100)
-
-            if (isChapterLine) {
-                saveCurrentChapter()
-                currentChapterIndex++
-                currentChapterTitle = trimmed.removePrefix("# ").trim()
-                currentSectionTitle = "Overview"
-                sentenceCount = 0
-                continue
-            }
-
-            // Detect Subheadings
-            val hasMarkdownHeaders = contentToParse.contains("#") || contentToParse.contains("##")
-            val isSubheading = if (hasMarkdownHeaders) {
-                (trimmed.startsWith("## ") || trimmed.startsWith("### ")) && trimmed.length < 150
-            } else {
-                trimmed.startsWith("## ") || trimmed.startsWith("### ") || (trimmed.length < 50 && !trimmed.endsWith(".") && !trimmed.endsWith("?"))
-            }
-
-            if (isSubheading) {
-                currentSectionTitle = trimmed.removePrefix("## ").removePrefix("### ").trim()
-                continue
-            }
-
-            // Split into sentences recursively
-            val sentences = trimmed.split(Regex("(?<=[.!?])\\s+"))
-            for (sent in sentences) {
-                val sText = sent.trim()
-                if (sText.isNotEmpty()) {
-                    // If no chapters detected yet, initialize Chapter 0
-                    if (currentChapterIndex == -1) {
-                        currentChapterIndex = 0
-                        currentChapterTitle = "Introduction"
-                    }
-                    sentencesList.add(
-                        SentenceEntity(
-                            id = "${bookId}_ch_${currentChapterIndex}_s_${sentenceCount}",
-                            bookId = bookId,
-                            chapterIndex = currentChapterIndex,
-                            sentenceIndex = sentenceCount,
-                            text = sText,
-                            sectionTitle = currentSectionTitle
-                        )
-                    )
-                    sentenceCount++
-                }
-            }
-        }
-        // Save the last chapter
-        saveCurrentChapter()
-
-        // If no chapters were saved at all, create an default chapter
-        if (chaptersList.isEmpty()) {
-            chaptersList.add(
-                ChapterEntity(
-                    id = "${bookId}_ch_0",
-                    bookId = bookId,
-                    title = "Main Text",
-                    orderIndex = 0,
-                    isSubchapter = false,
-                    parentTitle = null
-                )
+        val chaptersList = structure.chapters.mapIndexed { index, parsedCh ->
+            ChapterEntity(
+                id = "${bookId}_ch_${index}",
+                bookId = bookId,
+                title = parsedCh.title,
+                orderIndex = index,
+                isSubchapter = parsedCh.isSubchapter,
+                parentTitle = parsedCh.parentTitle
             )
         }
 
-        // 3. Persist to Room
+        val sentencesList = structure.sentences.map { parsedSent ->
+            SentenceEntity(
+                id = "${bookId}_ch_${parsedSent.chapterIndex}_s_${parsedSent.sentenceIndex}",
+                bookId = bookId,
+                chapterIndex = parsedSent.chapterIndex,
+                sentenceIndex = parsedSent.sentenceIndex,
+                text = parsedSent.text,
+                sectionTitle = parsedSent.sectionTitle
+            )
+        }
+
+        // Persist structured book directly to Room
         bookDao.insertBook(
             BookEntity(
                 id = bookId,

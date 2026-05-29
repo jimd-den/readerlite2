@@ -18,6 +18,7 @@ import kotlinx.coroutines.launch
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository: StudyRepository = (application as ReaderApplication).repository
+    private val importBookUseCase = (application as ReaderApplication).importBookUseCase
     private val prefs = application.getSharedPreferences("reader_settings", Context.MODE_PRIVATE)
 
     // OpenRouter Key
@@ -191,14 +192,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun importBook(title: String, author: String, fileType: String, content: String, filePath: String = "") {
         val classId = _selectedClassId.value ?: return
+        val finalPath = if (filePath.isNotEmpty()) filePath else "assets/$title"
         viewModelScope.launch {
-            repository.importBook(
+            importBookUseCase.execute(
                 classId = classId,
                 title = title,
                 author = author,
                 fileType = fileType,
-                filePath = if (filePath.isNotEmpty()) filePath else "assets/$title",
-                rawContent = content
+                filePath = finalPath,
+                rawContent = content,
+                inputStreamProvider = {
+                    if (fileType == "EPUB") {
+                        val file = java.io.File(finalPath)
+                        if (file.exists() && file.isFile) {
+                            file.inputStream()
+                        } else null
+                    } else null
+                }
             )
         }
     }
