@@ -73,9 +73,6 @@ fun MainAppScreen(
     ) { uri ->
         if (uri != null) {
             try {
-                val inputStream = context.contentResolver.openInputStream(uri)
-                val text = inputStream?.bufferedReader()?.use { it.readText() } ?: ""
-                
                 // Extract filename as default book title
                 var displayName = "Imported Document"
                 val cursor = context.contentResolver.query(uri, null, null, null, null)
@@ -92,7 +89,27 @@ fun MainAppScreen(
                 bookTitle = displayName.replace(Regex("\\.[a-zA-Z0-9]+$"), "")
                 bookAuthor = "Local Importer"
                 fileType = if (extension in listOf("EPUB", "PDF", "TXT")) extension else "TXT"
-                textContent = text
+                
+                // Parse file content based on file type
+                val parsedText = when (fileType) {
+                    "EPUB" -> {
+                        context.contentResolver.openInputStream(uri)?.use { stream ->
+                            com.example.ui.util.BookParser.parseEpub(stream)
+                        } ?: ""
+                    }
+                    "PDF" -> {
+                        context.contentResolver.openInputStream(uri)?.use { stream ->
+                            com.example.ui.util.BookParser.parsePdf(context, stream)
+                        } ?: ""
+                    }
+                    else -> {
+                        context.contentResolver.openInputStream(uri)?.use { stream ->
+                            stream.bufferedReader(Charsets.UTF_8).readText()
+                        } ?: ""
+                    }
+                }
+                
+                textContent = parsedText
                 showImportBookDialog = true
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -358,12 +375,21 @@ fun MainAppScreen(
                     ) {
                         Text("LOAD FILE DIRECTLY:", fontWeight = FontWeight.Bold, fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
                         TextButton(
-                            onClick = { filePickerLauncher.launch(arrayOf("text/plain")) },
+                            onClick = { 
+                                filePickerLauncher.launch(
+                                    arrayOf(
+                                        "text/plain", 
+                                        "application/pdf", 
+                                        "application/epub+zip", 
+                                        "application/octet-stream"
+                                    )
+                                ) 
+                            },
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                         ) {
                             Icon(Icons.Default.FileUpload, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("Select .txt file", fontSize = 11.sp)
+                            Text("Select Document (.txt, .pdf, .epub)", fontSize = 11.sp)
                         }
                     }
 
@@ -716,7 +742,7 @@ fun ClassWorkspaceScreen(
             ) {
                 Icon(Icons.Default.FileUpload, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.width(6.dp))
-                Text("Import text", fontSize = 12.sp)
+                Text("Import Document", fontSize = 12.sp)
             }
         }
 
