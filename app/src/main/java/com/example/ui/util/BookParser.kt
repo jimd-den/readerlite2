@@ -22,91 +22,225 @@ object BookParser {
             return "Error reading EPUB bytes"
         }
 
-        // 1. First Pass: Parse NCX (TOC) to identify chapters vs subheadings
-        val ncxChapters = mutableSetOf<String>()
-        val ncxSubheadings = mutableSetOf<String>()
-
+        val zipMap = mutableMapOf<String, ByteArray>()
         try {
             val zipStream = ZipInputStream(byteArr.inputStream())
             var entry = zipStream.nextEntry
             while (entry != null) {
-                val name = entry.name.lowercase()
-                if (name.endsWith(".ncx")) {
-                    val ncxXml = zipStream.bufferedReader(Charsets.UTF_8).readText()
-                    parseNcx(ncxXml, ncxChapters, ncxSubheadings)
-                    Log.d(TAG, "Parsed NCX table of contents. Chapters: ${ncxChapters.size}, Subheadings: ${ncxSubheadings.size}")
+                if (!entry.isDirectory) {
+                    zipMap[entry.name] = zipStream.readBytes()
                 }
                 zipStream.closeEntry()
                 entry = zipStream.nextEntry
             }
+            zipStream.close()
         } catch (e: Exception) {
-            Log.e(TAG, "Error in first-pass NCX parsing", e)
+            Log.e(TAG, "Error loading EPUB zip in memory", e)
+            return "Error reading EPUB contents"
         }
 
-        // 2. Second Pass: Read document contents
-        val zipStream = ZipInputStream(byteArr.inputStream())
+        if (zipMap.isEmpty()) {
+            return "Empty EPUB file (no contents)"
+        }
+
+        // Normalize zip map keys to allow easy lookup
+        val normalizedZipMap = zipMap.mapKeys { (key, _) ->
+            key.lowercase().replace('\\', '/').replace("//", "/").trimStart('/')
+        }
+
+        // Find the OPF file (metadata defining packaging and reading layout)
+        val opfEntry = normalizedZipMap.entries.find { it.key.endsWith(".opf") }
         val contentBuilder = StringBuilder()
-        
-        try {
-            var entry = zipStream.nextEntry
-            while (entry != null) {
-                val name = entry.name.lowercase()
-                // Read text content files which end with xhtml / html / htm (excluding images etc.)
-                if (name.endsWith(".xhtml") || name.endsWith(".html") || name.endsWith(".htm") || name.endsWith(".xml")) {
-                    // Skip containers, metadata and style files
-                    if (!name.contains("container.xml") && !name.contains("toc.ncx") && !name.contains("content.opf") && !name.contains("style")) {
-                        val fileContent = zipStream.bufferedReader(Charsets.UTF_8).readText()
-                        val textOnly = stripHtml(fileContent, ncxChapters, ncxSubheadings)
-                        if (textOnly.isNotBlank()) {
-                            // Extract title out of name
-                            val cleanChapterTitle = name.substringAfterLast("/").substringBeforeLast(".")
-                                .replace("_", " ")
-                                .replace("-", " ")
-                                .trim()
-                                .replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
-                            
-                            // If chapter title is not already inside content as a primary header, append it
-                            if (!textOnly.startsWith("# ")) {
-                                contentBuilder.append("\n# ").append(cleanChapterTitle).append("\n\n")
+
+        var opfParsedSuccessfully = false
+
+        if (opfEntry != null) {
+            val opfPath = opfEntry.key
+            val opfFolderPrefix = if (opfPath.contains("/")) opfPath.substringBeforeLast("/") + "/" else ""
+            val opfXmlStr = String(opfEntry.value, Charsets.UTF_8)
+            
+            // Extract manifest catalog and spine sequential order
+            val manifest = mutableMapOf<String, String>() // id -> href xml ref
+            val spine = mutableListOf<String>() // idref ordered list
+
+            try {
+                val parser = Xml.newPullParser()
+                parser.setInput(opfXmlStr.reader())
+                var eventType = parser.eventType
+                while (eventType != XmlPullParser.END_DOCUMENT) {
+                    val rawName = parser.name
+                    if (rawName != null) {
+                        val name = rawName.lowercase()
+                        if (eventType == XmlPullParser.START_TAG) {
+                            if (name == "item" || name.endsWith(":item")) {
+                                var id = ""
+                                var href = ""
+                                for (i in 0 until parser.attributeCount) {
+                                    val attrName = parser.getAttributeName(i).lowercase()
+                                    if (attrName == "id") {
+                                        id = parser.getAttributeValue(i) ?: ""
+                                    } else if (attrName == "href") {
+                                        href = parser.getAttributeValue(i) ?: ""
+                                    }
+                                }
+                                if (id.isNotEmpty() && href.isNotEmpty()) {
+                                    manifest[id] = href
+                                }
+                            } else if (name == "itemref" || name.endsWith(":itemref")) {
+                                var idref = ""
+                                for (i in 0 until parser.attributeCount) {
+                                    if (parser.getAttributeName(i).lowercase() == "idref") {
+                                        idref = parser.getAttributeValue(i) ?: ""
+                                        break
+                                    }
+                                }
+                                if (idref.isNotEmpty()) {
+                                    spine.add(idref)
+                                }
                             }
-                            contentBuilder.append(textOnly).append("\n")
                         }
                     }
+                    eventType = parser.next()
                 }
-                zipStream.closeEntry()
-                entry = zipStream.nextEntry
+                Log.d(TAG, "Parsed OPF xml metadata success. Spine elements: ${spine.size}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in OPF reader xml iteration parsing", e)
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            return "Error parsing EPUB: ${e.message}"
-        } finally {
-            try {
-                zipStream.close()
-            } catch (ex: Exception) {
-                // Ignore
+
+            // Parse NCX Table of Contents files for pristine chapter mapping
+            val ncxChapters = mutableSetOf<String>()
+            val ncxSubheadings = mutableSetOf<String>()
+            val fileToChapterMap = mutableMapOf<String, String>()
+
+            val ncxEntry = normalizedZipMap.entries.find { it.key.endsWith(".ncx") }
+            if (ncxEntry != null) {
+                try {
+                    val ncxXml = String(ncxEntry.value, Charsets.UTF_8)
+                    parseNcx(ncxXml, ncxChapters, ncxSubheadings, fileToChapterMap)
+                    Log.d(TAG, "Parsed NCX TOC. Mapped: ${fileToChapterMap.size}")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error reading NCX file", e)
+                }
+            }
+
+            // Extract each spine resource content file sequentially in linear reading sequence!
+            if (spine.isNotEmpty()) {
+                var contentsSuccessfullyTranscribed = 0
+                for (idref in spine) {
+                    val relativeHref = manifest[idref] ?: continue
+                    
+                    // Construct and normalize absolute path inside zip resource file system
+                    val entryPath = (opfFolderPrefix + relativeHref).lowercase()
+                        .replace('\\', '/').replace("//", "/").trimStart('/')
+                    
+                    val fileBytes = normalizedZipMap[entryPath] ?: continue
+                    val fileContent = String(fileBytes, Charsets.UTF_8)
+                    val textOnly = stripHtml(fileContent, ncxChapters, ncxSubheadings)
+                    
+                    if (textOnly.isNotBlank()) {
+                        val simpleName = entryPath.substringAfterLast("/").lowercase().trim()
+                        
+                        // Use accurate NCX title mapped filename or beautifully formatted title
+                        val cleanChapterTitle = fileToChapterMap[simpleName] ?: entryPath.substringAfterLast("/").substringBeforeLast(".")
+                            .replace("_", " ")
+                            .replace("-", " ")
+                            .trim()
+                            .replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+
+                        // Check if the stripped content already starts with a structural header to avoid repeats
+                        val alreadyHasHeaderPrefix = textOnly.startsWith("# ") || textOnly.startsWith("## ")
+                        
+                        if (!alreadyHasHeaderPrefix) {
+                            contentBuilder.append("\n# ").append(cleanChapterTitle).append("\n\n")
+                        }
+                        contentBuilder.append(textOnly).append("\n")
+                        contentsSuccessfullyTranscribed++
+                    }
+                }
+                if (contentsSuccessfullyTranscribed > 0) {
+                    opfParsedSuccessfully = true
+                }
             }
         }
+
+        // Alphabetical markup content fallback if OPF parsing failed or spine content is empty
+        if (!opfParsedSuccessfully) {
+            Log.w(TAG, "Fallback to alphabetical physical parsing.")
+            val textBlocks = normalizedZipMap.entries
+                .filter { (key, _) ->
+                    (key.endsWith(".xhtml") || key.endsWith(".html") || key.endsWith(".htm") || key.endsWith(".xml")) &&
+                    !key.contains("container.xml") && !key.contains("toc.ncx") && !key.contains("content.opf") && !key.contains("style")
+                }
+                .sortedBy { it.key }
+
+            val genericChapters = mutableSetOf<String>()
+            val genericSubheadings = mutableSetOf<String>()
+
+            for ((key, byteData) in textBlocks) {
+                val fileContent = String(byteData, Charsets.UTF_8)
+                val textOnly = stripHtml(fileContent, genericChapters, genericSubheadings)
+                if (textOnly.isNotBlank()) {
+                    val cleanChapterTitle = key.substringAfterLast("/").substringBeforeLast(".")
+                        .replace("_", " ")
+                        .replace("-", " ")
+                        .trim()
+                        .replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+
+                    if (!textOnly.startsWith("# ") && !textOnly.startsWith("## ")) {
+                        contentBuilder.append("\n# ").append(cleanChapterTitle).append("\n\n")
+                    }
+                    contentBuilder.append(textOnly).append("\n")
+                }
+            }
+        }
+
         return contentBuilder.toString()
     }
 
-    private fun parseNcx(xmlContent: String, chapters: MutableSet<String>, subheadings: MutableSet<String>) {
+    private fun parseNcx(
+        xmlContent: String, 
+        chapters: MutableSet<String>, 
+        subheadings: MutableSet<String>,
+        fileToChapterMap: MutableMap<String, String>
+    ) {
         try {
             val parser = Xml.newPullParser()
             parser.setInput(xmlContent.reader())
             var eventType = parser.eventType
+            
             var currentNavPointDepth = 0
             var inLabelText = false
             val textBuilder = StringBuilder()
 
+            // Depth tracking stacks to avoid nested navPoint override issues
+            val depthTitles = Array(32) { "" }
+            val depthSrcs = Array(32) { "" }
+
             while (eventType != XmlPullParser.END_DOCUMENT) {
-                val name = parser.name
+                val rawName = parser.name
+                val name = rawName?.lowercase()
                 when (eventType) {
                     XmlPullParser.START_TAG -> {
-                        if (name == "navPoint") {
+                        if (name == "navpoint") {
                             currentNavPointDepth++
+                            if (currentNavPointDepth < 32) {
+                                depthTitles[currentNavPointDepth] = ""
+                                depthSrcs[currentNavPointDepth] = ""
+                            }
                         } else if (name == "text") {
                             inLabelText = true
                             textBuilder.setLength(0)
+                        } else if (name == "content") {
+                            var srcVal = ""
+                            for (i in 0 until parser.attributeCount) {
+                                if (parser.getAttributeName(i).lowercase() == "src") {
+                                    srcVal = parser.getAttributeValue(i) ?: ""
+                                    break
+                                }
+                            }
+                            if (currentNavPointDepth < 32) {
+                                depthSrcs[currentNavPointDepth] = srcVal
+                            }
                         }
                     }
                     XmlPullParser.TEXT -> {
@@ -115,18 +249,30 @@ object BookParser {
                         }
                     }
                     XmlPullParser.END_TAG -> {
-                        if (name == "navPoint") {
-                            currentNavPointDepth--
-                        } else if (name == "text") {
+                        if (name == "text") {
                             inLabelText = false
-                            val cleanTitle = textBuilder.toString().trim()
-                            if (cleanTitle.isNotEmpty()) {
-                                if (currentNavPointDepth == 1) {
-                                    chapters.add(cleanTitle)
-                                } else if (currentNavPointDepth > 1) {
-                                    subheadings.add(cleanTitle)
+                            if (currentNavPointDepth < 32) {
+                                depthTitles[currentNavPointDepth] = textBuilder.toString().trim()
+                            }
+                        } else if (name == "navpoint") {
+                            if (currentNavPointDepth < 32) {
+                                val title = depthTitles[currentNavPointDepth]
+                                val src = depthSrcs[currentNavPointDepth]
+                                if (title.isNotEmpty()) {
+                                    if (currentNavPointDepth == 1) {
+                                        chapters.add(title)
+                                        if (src.isNotEmpty()) {
+                                            val cleanFile = src.substringBefore("#").substringAfterLast("/").lowercase().trim()
+                                            if (cleanFile.isNotEmpty()) {
+                                                fileToChapterMap[cleanFile] = title
+                                            }
+                                        }
+                                    } else {
+                                        subheadings.add(title)
+                                    }
                                 }
                             }
+                            currentNavPointDepth--
                         }
                     }
                 }
@@ -283,6 +429,15 @@ object BookParser {
                 .replace("&rsquo;", "’")
         }
         
+        // Clean up soft hyphens and other word-splitting artifacts that fragment individual words
+        text = text
+            .replace("\u00ad", "")  // Soft hyphen
+            .replace("\u200b", "")  // Zero-width space
+            .replace("\u200c", "")  // Zero-width non-joiner
+            .replace("\u200d", "")  // Zero-width joiner
+            .replace("&shy;", "")   // Entity soft-hyphen
+            .replace("&#173;", "")  // Numeric soft-hyphen
+
         // Clean up redundant consecutive newlines keeping max 2
         text = text.replace("\n\\s*\n\\s*\n+".toRegex(), "\n\n")
         

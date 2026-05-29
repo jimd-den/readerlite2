@@ -113,7 +113,11 @@ class StudyRepositoryImpl(
             if (trimmed.isEmpty()) continue
 
             // Detect Chapters
-            if (trimmed.startsWith("# ") || trimmed.startsWith("Chapter", ignoreCase = true) && trimmed.contains(":") || trimmed.matches(Regex("^(CHAPTER|Chapter)\\s+\\d+.*"))) {
+            val isChapterLine = (trimmed.startsWith("# ") && trimmed.length < 150) || 
+                                (trimmed.startsWith("Chapter", ignoreCase = true) && trimmed.contains(":") && trimmed.length < 100) || 
+                                (trimmed.matches(Regex("^(CHAPTER|Chapter)\\s+\\d+.*")) && trimmed.length < 100)
+
+            if (isChapterLine) {
                 saveCurrentChapter()
                 currentChapterIndex++
                 currentChapterTitle = trimmed.removePrefix("# ").trim()
@@ -125,7 +129,7 @@ class StudyRepositoryImpl(
             // Detect Subheadings
             val hasMarkdownHeaders = contentToParse.contains("#") || contentToParse.contains("##")
             val isSubheading = if (hasMarkdownHeaders) {
-                trimmed.startsWith("## ") || trimmed.startsWith("### ")
+                (trimmed.startsWith("## ") || trimmed.startsWith("### ")) && trimmed.length < 150
             } else {
                 trimmed.startsWith("## ") || trimmed.startsWith("### ") || (trimmed.length < 50 && !trimmed.endsWith(".") && !trimmed.endsWith("?"))
             }

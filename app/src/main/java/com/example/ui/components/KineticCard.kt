@@ -261,7 +261,9 @@ fun KineticCard(
                                         scaleY = scaleAnim
                                     }
                                     .padding(vertical = 2.dp)
-                                    .padding(end = 6.dp)
+                                    .padding(end = 6.dp),
+                                softWrap = false,
+                                maxLines = 1
                             )
                         }
                     }
