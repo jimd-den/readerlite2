@@ -40,41 +40,157 @@ object BookParser {
 
     private fun parseEpub3Nav(navXml: String, navPath: String): List<TocItem> {
         val items = mutableListOf<TocItem>()
+        
+        class NavPointNode(
+            var title: String = "",
+            var href: String = "",
+            val children: MutableList<NavPointNode> = mutableListOf(),
+            var parent: NavPointNode? = null
+        )
+
+        val rootNode = NavPointNode()
+        var contentToParse = navXml
+        
         try {
             val navRegex = Regex("<nav[^>]*epub:type=[\"']toc[\"'][^>]*>(.*?)</nav>", RegexOption.DOT_MATCHES_ALL)
-            val navMatch = navRegex.find(navXml)
-            val contentToParse = navMatch?.groups?.get(1)?.value ?: navXml
-            
-            val aTagRegex = Regex("<a\\b[^>]*href\\s*=\\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", RegexOption.DOT_MATCHES_ALL)
-            val matches = aTagRegex.findAll(contentToParse)
-            for (match in matches) {
-                val href = match.groups[1]?.value ?: continue
-                val rawTitle = match.groups[2]?.value ?: ""
-                val cleanTitle = rawTitle.replace("<[^>]*>".toRegex(), "").trim()
-                
-                val zipPath = getAbsoluteZipPath(href, navPath)
-                val fragment = getFragment(href)
-                items.add(TocItem(cleanTitle, zipPath, fragment, href))
+            var navMatch = navRegex.find(navXml)
+            if (navMatch == null) {
+                val looseNavRegex = Regex("<nav[^>]*>(.*?)</nav>", RegexOption.DOT_MATCHES_ALL)
+                navMatch = looseNavRegex.find(navXml)
             }
+            contentToParse = navMatch?.value ?: navXml
+
+            val parser = Xml.newPullParser()
+            parser.setInput(contentToParse.reader())
+            var eventType = parser.eventType
+
+            var currentOlDepth = 0
+            val activeNodesByDepth = Array<NavPointNode?>(32) { null }
+            var inAnchorText = false
+            val textBuilder = StringBuilder()
+            var currentHref = ""
+
+            while (eventType != XmlPullParser.END_DOCUMENT) {
+                val rawName = parser.name
+                val name = rawName?.lowercase()
+                when (eventType) {
+                    XmlPullParser.START_TAG -> {
+                        if (name == "ol") {
+                            currentOlDepth++
+                        } else if (name == "li") {
+                            val parentNode = if (currentOlDepth <= 1) {
+                                rootNode
+                            } else {
+                                if (currentOlDepth - 1 < 32) {
+                                    activeNodesByDepth[currentOlDepth - 1] ?: rootNode
+                                } else {
+                                    rootNode
+                                }
+                            }
+                            val newNode = NavPointNode(parent = parentNode)
+                            parentNode.children.add(newNode)
+                            if (currentOlDepth < 32) {
+                                activeNodesByDepth[currentOlDepth] = newNode
+                            }
+                        } else if (name == "a") {
+                            inAnchorText = true
+                            textBuilder.setLength(0)
+                            currentHref = ""
+                            for (i in 0 until parser.attributeCount) {
+                                if (parser.getAttributeName(i).lowercase() == "href") {
+                                    currentHref = parser.getAttributeValue(i) ?: ""
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    XmlPullParser.TEXT -> {
+                        if (inAnchorText) {
+                            textBuilder.append(parser.text)
+                        }
+                    }
+                    XmlPullParser.END_TAG -> {
+                        if (name == "ol") {
+                            currentOlDepth = java.lang.Math.max(0, currentOlDepth - 1)
+                        } else if (name == "a") {
+                            inAnchorText = false
+                            if (currentOlDepth < 32) {
+                                val currentNode = activeNodesByDepth[currentOlDepth]
+                                if (currentNode != null) {
+                                    currentNode.title = textBuilder.toString().trim()
+                                    currentNode.href = currentHref
+                                }
+                            }
+                        }
+                    }
+                }
+                eventType = parser.next()
+            }
+
+            fun traverse(node: NavPointNode, depth: Int, parentTitle: String?) {
+                if (node != rootNode) {
+                    val title = node.title
+                    val src = node.href
+                    if (title.isNotEmpty()) {
+                        val zipPath = getAbsoluteZipPath(src, navPath)
+                        val fragment = getFragment(src)
+                        val isSubch = depth > 0
+                        items.add(TocItem(title, zipPath, fragment, src, isSubch, parentTitle))
+                    }
+                }
+                for (child in node.children) {
+                    traverse(child, depth + if (node == rootNode) 0 else 1, if (node == rootNode) null else node.title)
+                }
+            }
+
+            traverse(rootNode, 0, null)
+
         } catch (e: Exception) {
             Log.e(TAG, "Error parsing EPUB 3 Nav file", e)
         }
+
+        if (items.isEmpty()) {
+            try {
+                val aTagRegex = Regex("<a\\b[^>]*href\\s*=\\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", RegexOption.DOT_MATCHES_ALL)
+                val matches = aTagRegex.findAll(contentToParse)
+                for (match in matches) {
+                    val href = match.groups[1]?.value ?: continue
+                    val rawTitle = match.groups[2]?.value ?: ""
+                    val cleanTitle = rawTitle.replace("<[^>]*>".toRegex(), "").trim()
+                    
+                    val zipPath = getAbsoluteZipPath(href, navPath)
+                    val fragment = getFragment(href)
+                    items.add(TocItem(cleanTitle, zipPath, fragment, href))
+                }
+            } catch (ex: Exception) {
+                Log.e(TAG, "Error in loose EPUB3 nav parsing fallback", ex)
+            }
+        }
+
         return items
     }
 
     private fun parseEpub2Ncx(ncxXml: String, ncxPath: String): List<TocItem> {
         val items = mutableListOf<TocItem>()
+        
+        class NavPointNode(
+            var id: String = "",
+            var title: String = "",
+            var href: String = "",
+            val children: MutableList<NavPointNode> = mutableListOf(),
+            var parent: NavPointNode? = null
+        )
+
+        val rootNode = NavPointNode(id = "root")
+        var currentNode: NavPointNode = rootNode
+
         try {
             val parser = Xml.newPullParser()
             parser.setInput(ncxXml.reader())
             var eventType = parser.eventType
             
-            var currentNavPointDepth = 0
             var inLabelText = false
             val textBuilder = StringBuilder()
-
-            val depthTitles = Array(32) { "" }
-            val depthSrcs = Array(32) { "" }
 
             while (eventType != XmlPullParser.END_DOCUMENT) {
                 val rawName = parser.name
@@ -82,11 +198,16 @@ object BookParser {
                 when (eventType) {
                     XmlPullParser.START_TAG -> {
                         if (name == "navpoint") {
-                            currentNavPointDepth++
-                            if (currentNavPointDepth < 32) {
-                                depthTitles[currentNavPointDepth] = ""
-                                depthSrcs[currentNavPointDepth] = ""
+                            var navId = ""
+                            for (i in 0 until parser.attributeCount) {
+                                if (parser.getAttributeName(i).lowercase() == "id") {
+                                    navId = parser.getAttributeValue(i) ?: ""
+                                    break
+                                }
                             }
+                            val newNode = NavPointNode(id = navId, parent = currentNode)
+                            currentNode.children.add(newNode)
+                            currentNode = newNode
                         } else if (name == "text") {
                             inLabelText = true
                             textBuilder.setLength(0)
@@ -98,9 +219,7 @@ object BookParser {
                                     break
                                 }
                             }
-                            if (currentNavPointDepth < 32) {
-                                depthSrcs[currentNavPointDepth] = srcVal
-                            }
+                            currentNode.href = srcVal
                         }
                     }
                     XmlPullParser.TEXT -> {
@@ -111,29 +230,33 @@ object BookParser {
                     XmlPullParser.END_TAG -> {
                         if (name == "text") {
                             inLabelText = false
-                            if (currentNavPointDepth < 32) {
-                                depthTitles[currentNavPointDepth] = textBuilder.toString().trim()
-                            }
+                            currentNode.title = textBuilder.toString().trim()
                         } else if (name == "navpoint") {
-                            if (currentNavPointDepth < 32) {
-                                val title = depthTitles[currentNavPointDepth]
-                                val src = depthSrcs[currentNavPointDepth]
-                                if (title.isNotEmpty()) {
-                                    val zipPath = getAbsoluteZipPath(src, ncxPath)
-                                    val fragment = getFragment(src)
-                                    val isSubch = currentNavPointDepth > 1
-                                    val parentT = if (isSubch && currentNavPointDepth - 1 < 32) {
-                                        depthTitles[currentNavPointDepth - 1]
-                                    } else null
-                                    items.add(TocItem(title, zipPath, fragment, src, isSubch, parentT))
-                                }
-                            }
-                            currentNavPointDepth--
+                            currentNode = currentNode.parent ?: rootNode
                         }
                     }
                 }
                 eventType = parser.next()
             }
+            
+            fun traverse(node: NavPointNode, depth: Int, parentTitle: String?) {
+                if (node != rootNode) {
+                    val title = node.title
+                    val src = node.href
+                    if (title.isNotEmpty()) {
+                        val zipPath = getAbsoluteZipPath(src, ncxPath)
+                        val fragment = getFragment(src)
+                        val isSubch = depth > 0
+                        items.add(TocItem(title, zipPath, fragment, src, isSubch, parentTitle))
+                    }
+                }
+                for (child in node.children) {
+                    traverse(child, depth + if (node == rootNode) 0 else 1, if (node == rootNode) null else node.title)
+                }
+            }
+            
+            traverse(rootNode, 0, null)
+            
         } catch (e: Exception) {
             Log.e(TAG, "Error parsing NCX", e)
         }
@@ -317,7 +440,6 @@ object BookParser {
 
         val chaptersList = mutableListOf<ParsedChapter>()
         val sentencesList = mutableListOf<com.example.data.db.SentenceEntity>()
-        var chapterCounter = 0
 
         for (idref in spine) {
             val relativeHref = manifest[idref] ?: continue
@@ -329,27 +451,29 @@ object BookParser {
                 val fileContent = String(fileBytes, Charsets.UTF_8)
                 val fileTocItems = unifiedTocList.filter { it.zipPath == entryPath }
                 
-                val firstTocItem = fileTocItems.firstOrNull()
-                val (chapterTitle, isSub, pTitle) = if (firstTocItem != null) {
-                    Triple(firstTocItem.title, firstTocItem.isSubchapter, firstTocItem.parentTitle)
+                val fileChapters = if (fileTocItems.isNotEmpty()) {
+                    fileTocItems.map { item ->
+                        ParsedChapter(item.title, item.isSubchapter, item.parentTitle)
+                    }
                 } else {
                     val fallbackTitle = entryPath.substringAfterLast("/").substringBeforeLast(".")
                         .replace("_", " ")
                         .replace("-", " ")
                         .trim()
                         .replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
-                    Triple(fallbackTitle, false, null)
+                    listOf(ParsedChapter(fallbackTitle, false, null))
                 }
 
-                val allChaptersSet = fileTocItems.filter { !it.isSubchapter }.map { cleanForMatch(it.title) }.toSet()
-                val allSubheadingsSet = fileTocItems.filter { it.isSubchapter }.map { cleanForMatch(it.title) }.toSet()
+                val allChaptersSet = fileChapters.filter { !it.isSubchapter }.map { cleanForMatch(it.title) }.toSet()
+                val allSubheadingsSet = fileChapters.filter { it.isSubchapter }.map { cleanForMatch(it.title) }.toSet()
 
                 val textOnly = stripHtml(fileContent, allChaptersSet, allSubheadingsSet)
                 if (textOnly.isNotBlank()) {
-                    chaptersList.add(ParsedChapter(chapterTitle, isSub, pTitle))
+                    val activeChapterIndexStart = chaptersList.size
+                    chaptersList.addAll(fileChapters)
 
                     val lines = textOnly.split("\n")
-                    var currentSectionTitle = if (isSub && pTitle != null) pTitle else "Overview"
+                    var currentActiveSubIndex = 0
                     var sentenceCount = 0
 
                     for (line in lines) {
@@ -357,32 +481,40 @@ object BookParser {
                         if (lineTrimmed.isEmpty()) continue
 
                         val cleanLine = cleanForMatch(lineTrimmed)
-                        val matchedSubheading = fileTocItems.find { it.isSubchapter && cleanForMatch(it.title) == cleanLine }
-                        
-                        if (matchedSubheading != null) {
-                            currentSectionTitle = matchedSubheading.title
+                        var shifted = false
+                        for (nextIdx in (currentActiveSubIndex + 1) until fileChapters.size) {
+                            if (cleanForMatch(fileChapters[nextIdx].title) == cleanLine) {
+                                currentActiveSubIndex = nextIdx
+                                shifted = true
+                                break
+                            }
+                        }
+
+                        if (shifted || cleanLine == cleanForMatch(fileChapters[currentActiveSubIndex].title)) {
                             continue
                         }
 
                         val sentences = lineTrimmed.split(Regex("(?<=[.!?])\\s+"))
+                        val activeGlChapterIndex = activeChapterIndexStart + currentActiveSubIndex
+                        val sectionTitle = fileChapters[currentActiveSubIndex].title
+
                         for (sent in sentences) {
                             val sText = sent.trim()
                             if (sText.isNotEmpty()) {
                                 sentencesList.add(
                                     com.example.data.db.SentenceEntity(
-                                        id = "${bookId}_ch_${chapterCounter}_s_${sentenceCount}",
+                                        id = "${bookId}_ch_${activeGlChapterIndex}_s_${sentenceCount}",
                                         bookId = bookId,
-                                        chapterIndex = chapterCounter,
+                                        chapterIndex = activeGlChapterIndex,
                                         sentenceIndex = sentenceCount,
                                         text = sText,
-                                        sectionTitle = currentSectionTitle
+                                        sectionTitle = sectionTitle
                                     )
                                 )
                                 sentenceCount++
                             }
                         }
                     }
-                    chapterCounter++
                 }
             }
         }
