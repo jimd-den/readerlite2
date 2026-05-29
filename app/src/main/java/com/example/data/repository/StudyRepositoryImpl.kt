@@ -123,7 +123,14 @@ class StudyRepositoryImpl(
             }
 
             // Detect Subheadings
-            if (trimmed.startsWith("## ") || trimmed.startsWith("### ") || (trimmed.length < 50 && !trimmed.endsWith(".") && !trimmed.endsWith("?"))) {
+            val hasMarkdownHeaders = contentToParse.contains("#") || contentToParse.contains("##")
+            val isSubheading = if (hasMarkdownHeaders) {
+                trimmed.startsWith("## ") || trimmed.startsWith("### ")
+            } else {
+                trimmed.startsWith("## ") || trimmed.startsWith("### ") || (trimmed.length < 50 && !trimmed.endsWith(".") && !trimmed.endsWith("?"))
+            }
+
+            if (isSubheading) {
                 currentSectionTitle = trimmed.removePrefix("## ").removePrefix("### ").trim()
                 continue
             }

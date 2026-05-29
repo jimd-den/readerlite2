@@ -5,6 +5,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -1376,7 +1378,13 @@ fun ReadSentencePane(
                     .fillMaxWidth(),
                 contentAlignment = Alignment.Center
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState()),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
                     // Secondary preceding context
                     if (activeSentenceIndex > 0) {
                         Text(
@@ -1560,7 +1568,32 @@ fun ReadSentencePane(
     }
 }
 
-// 2.5 Global Settings Dialog Window Composable
+// 2.5 Curator Font Catalog & Settings Dialog Composable
+data class FontCatalogItem(
+    val name: String,
+    val category: String,
+    val fallbackFamily: FontFamily,
+    val description: String
+)
+
+val PREBUILT_FONTS = listOf(
+    FontCatalogItem("Space Grotesk", "Sans-Serif", FontFamily.SansSerif, "Geometric display sans"),
+    FontCatalogItem("Cinzel", "Display", FontFamily.Serif, "Classical Roman elegance"),
+    FontCatalogItem("Playfair Display", "Serif", FontFamily.Serif, "High-contrast dynamic literary"),
+    FontCatalogItem("Lora", "Serif", FontFamily.Serif, "Contemporary calligraphic reading"),
+    FontCatalogItem("Merriweather", "Serif", FontFamily.Serif, "Engraved text readability serif"),
+    FontCatalogItem("Montserrat", "Sans-Serif", FontFamily.SansSerif, "Urban geometric symmetry"),
+    FontCatalogItem("Inter", "Sans-Serif", FontFamily.SansSerif, "Premium interface legibility"),
+    FontCatalogItem("JetBrains Mono", "Monospace", FontFamily.Monospace, "Optimized structural code layout"),
+    FontCatalogItem("Fira Code", "Monospace", FontFamily.Monospace, "Code structure with ligatures"),
+    FontCatalogItem("Caveat", "Handwriting", FontFamily.Cursive, "Natural script brushstrokes"),
+    FontCatalogItem("Pacifico", "Handwriting", FontFamily.Cursive, "Retro script bold cursive"),
+    FontCatalogItem("Dancing Script", "Handwriting", FontFamily.Cursive, "Fluid dancing calligraphic loops"),
+    FontCatalogItem("Lobster", "Display", FontFamily.Cursive, "Vintage heavy display script"),
+    FontCatalogItem("Bebas Neue", "Display", FontFamily.SansSerif, "Condensed bold impact heading"),
+    FontCatalogItem("Righteous", "Display", FontFamily.SansSerif, "Futuristic bubble art deco")
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GlobalSettingsDialog(
@@ -1579,6 +1612,19 @@ fun GlobalSettingsDialog(
     var selectedModelInput by remember { mutableStateOf(openRouterModel) }
     var fontNameInput by remember { mutableStateOf("") }
     var showModelDropdown by remember { mutableStateOf(false) }
+
+    // Search and category tracking inside typography explorer
+    var fontQuery by remember { mutableStateOf("") }
+    var fontCategoryTab by remember { mutableStateOf("All") }
+    val context = LocalContext.current
+    
+    var downloadedMap by remember { mutableStateOf(emptyMap<String, Boolean>()) }
+
+    // Update download map when activeFontName updates or dialog loads
+    LaunchedEffect(activeFontName) {
+        val map = PREBUILT_FONTS.associate { it.name to com.example.ui.util.FontDownloader.isFontDownloaded(context, it.name) }
+        downloadedMap = map
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1638,10 +1684,10 @@ fun GlobalSettingsDialog(
 
                 Divider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
 
-                // Section 2: Download Custom Fonts from Google Fonts
+                // Section 2: Curated Google Fonts Directory & Explorer
                 Column {
                     Text(
-                        text = "2. JIT GOOGLE FONTS",
+                        text = "2. DYNAMIC GOOGLE FONTS",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace,
@@ -1649,12 +1695,192 @@ fun GlobalSettingsDialog(
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Input a Google Font name (e.g. Playfair Display, Space Grotesk, Roboto Mono, Montserrat, Lobster) to dynamically download and load it.",
+                        text = "Browse, search, and preview Google Fonts categorized by style. Tap any item to download & apply dynamically.",
                         fontSize = 10.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
                     )
                     Spacer(modifier = Modifier.height(8.dp))
-                    
+
+                    // Text Query Search Bar
+                    OutlinedTextField(
+                        value = fontQuery,
+                        onValueChange = { fontQuery = it },
+                        placeholder = { Text("Search curated fonts (e.g. Lora, Inter...)", fontSize = 11.sp) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp),
+                        trailingIcon = {
+                            if (fontQuery.isNotEmpty()) {
+                                IconButton(onClick = { fontQuery = "" }) {
+                                    Icon(Icons.Default.Close, contentDescription = "Clear", modifier = Modifier.size(16.dp))
+                                }
+                            }
+                        }
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Category Filter Scroll Row
+                    val fontCategories = listOf("All", "Serif", "Sans-Serif", "Monospace", "Handwriting", "Display")
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        items(fontCategories) { cat ->
+                            val isCatSelected = fontCategoryTab == cat
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(
+                                        if (isCatSelected) MaterialTheme.colorScheme.primary 
+                                        else MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                    .clickable { fontCategoryTab = cat }
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = cat.uppercase(),
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isCatSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    val filteredCatalog = PREBUILT_FONTS.filter { font ->
+                        val matchesQuery = font.name.contains(fontQuery, ignoreCase = true) || font.description.contains(fontQuery, ignoreCase = true)
+                        val matchesCategory = fontCategoryTab == "All" || font.category.equals(fontCategoryTab, ignoreCase = true)
+                        matchesQuery && matchesCategory
+                    }
+
+                    // Constrained scrollable catalog grid box
+                    Box(
+                        modifier = Modifier
+                            .heightIn(max = 240.dp)
+                            .fillMaxWidth()
+                            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f), RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.4f))
+                            .padding(4.dp)
+                    ) {
+                        androidx.compose.foundation.lazy.LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            if (filteredCatalog.isEmpty()) {
+                                item {
+                                    Box(
+                                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text("No matching fonts found offline", fontSize = 11.sp, color = Color.Gray)
+                                    }
+                                }
+                            }
+
+                            items(filteredCatalog) { font ->
+                                val isFontActive = font.name.equals(activeFontName, ignoreCase = true)
+                                val isInstalled = downloadedMap[font.name] ?: false
+
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onDownloadFont(font.name) },
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = if (isFontActive) MaterialTheme.colorScheme.primaryContainer 
+                                                         else MaterialTheme.colorScheme.surface.copy(alpha = 0.6f)
+                                    ),
+                                    shape = RoundedCornerShape(8.dp),
+                                    border = BorderStroke(
+                                        width = 1.dp,
+                                        color = if (isFontActive) MaterialTheme.colorScheme.primary else Color.Transparent
+                                    )
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth().padding(10.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Text(
+                                                    text = font.name,
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
+                                                Box(
+                                                    modifier = Modifier
+                                                        .background(MaterialTheme.colorScheme.secondary.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
+                                                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                                                ) {
+                                                    Text(
+                                                        text = font.category.uppercase(),
+                                                        fontSize = 8.sp,
+                                                        fontWeight = FontWeight.ExtraBold,
+                                                        color = MaterialTheme.colorScheme.secondary
+                                                    )
+                                                }
+                                            }
+
+                                            // Visual dynamic type preview based on categories
+                                            Text(
+                                                text = when (font.category) {
+                                                    "Serif" -> "Empirical Literary Typology"
+                                                    "Sans-Serif" -> "Symmetrical Clean Interface"
+                                                    "Monospace" -> "fun reader() { compile_xml_toc() }"
+                                                    "Handwriting" -> "Graceful handwritten stroke script"
+                                                    "Display" -> "BOLD ARTISTIC HEADLINE POSTER"
+                                                    else -> "Sensory reading type style"
+                                                },
+                                                fontFamily = font.fallbackFamily,
+                                                fontStyle = if (font.category == "Handwriting") FontStyle.Italic else FontStyle.Normal,
+                                                fontSize = 11.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                                modifier = Modifier.padding(top = 4.dp)
+                                            )
+                                        }
+
+                                        Column(horizontalAlignment = Alignment.End) {
+                                            if (isFontActive) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Check,
+                                                    contentDescription = "Active",
+                                                    tint = MaterialTheme.colorScheme.primary,
+                                                    modifier = Modifier.size(16.dp)
+                                                )
+                                            } else if (isInstalled) {
+                                                Text("Apply", fontSize = 9.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                                            } else {
+                                                Icon(
+                                                    imageVector = Icons.Default.ArrowDownward,
+                                                    contentDescription = "Download Font",
+                                                    tint = Color.Gray.copy(alpha = 0.6f),
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Text(
+                        text = "Or input any custom Google Font by exact name:",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -1663,7 +1889,7 @@ fun GlobalSettingsDialog(
                         OutlinedTextField(
                             value = fontNameInput,
                             onValueChange = { fontNameInput = it },
-                            placeholder = { Text("Font Name", fontSize = 11.sp) },
+                            placeholder = { Text("Exact Font Name (e.g. Syne)", fontSize = 11.sp) },
                             singleLine = true,
                             modifier = Modifier.weight(1f),
                             textStyle = androidx.compose.ui.text.TextStyle(fontSize = 11.sp)
@@ -1678,13 +1904,13 @@ fun GlobalSettingsDialog(
                             shape = RoundedCornerShape(8.dp),
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
                         ) {
-                            Text("Download", fontSize = 11.sp)
+                            Text("Fetch", fontSize = 11.sp)
                         }
                     }
 
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Active Font: $activeFontName",
+                        text = "Current Active Font: $activeFontName",
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
                         fontFamily = FontFamily.Monospace,

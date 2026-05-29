@@ -114,22 +114,46 @@ object CompositionSampler {
         val wordOpacities = ArrayList<Float>(words.size)
         val wordTrackings = ArrayList<Float>(words.size)
 
+        val connectors = setOf("the", "a", "an", "and", "or", "but", "if", "then", "of", "in", "on", "at", "to", "for", "with", "by", "as", "is", "was", "are", "were", "be", "been", "has", "have", "had", "it", "its", "this", "that", "these", "those")
+
         for (i in words.indices) {
             val randWeight = rng.nextFloat()
-            val baseW = lerp(400f, 700f, randWeight) * (1f + profile.weightContrast * profile.chaosLevel)
+            val cleanWord = words[i].lowercase().replace(Regex("[^a-z]"), "")
+            
+            // Differentiate word importance for kinetic emphasis mapping
+            val importanceFactor = when {
+                connectors.contains(cleanWord) -> 0.72f // small secondary grammatical tokens
+                words[i].any { it.isUpperCase() } -> 1.38f // capitalized words emphasis
+                cleanWord.length > 7 -> 1.25f // complex/long words emphasis
+                else -> 1.0f
+            }
+
+            val importanceWeightOffset = when {
+                connectors.contains(cleanWord) -> -160
+                words[i].any { it.isUpperCase() } -> 220
+                cleanWord.length > 7 -> 120
+                else -> 0
+            }
+
+            val baseW = (lerp(400f, 700f, randWeight) + importanceWeightOffset * profile.weightContrast)
             val varianceW = profile.chaosLevel * profile.weightContrast * 200f
-            val finalWeight = (baseW + (rng.nextFloat() - 0.5f) * varianceW).toInt().coerceIn(300, 800)
+            val finalWeight = (baseW + (rng.nextFloat() - 0.5f) * varianceW).toInt().coerceIn(300, 900)
             wordWeights.add(finalWeight)
 
             val baseScaleFactor = when (layoutMode) {
-                "poster" -> 1.8f
-                "display" -> 1.35f
-                "code" -> 0.85f
-                else -> 1.05f
+                "poster" -> 1.95f
+                "display" -> 1.45f
+                "code" -> 0.82f
+                else -> 1.08f
             }
-            val baseSize = userFontSize * profile.sizeScale * baseScaleFactor
-            val varianceS = profile.chaosLevel * 0.15f * baseSize
-            val finalSize = (baseSize + (rng.nextFloat() - 0.5f) * varianceS).coerceIn(14f, baseSize * 1.5f)
+            
+            // Highly responsive and expressive size variance
+            val scaleFactorFromImportance = lerp(1.0f, importanceFactor, profile.sizeScale * 0.9f)
+            val baseSize = userFontSize * profile.sizeScale * baseScaleFactor * scaleFactorFromImportance
+            
+            val maxVarianceFactor = profile.chaosLevel * 0.48f
+            val varianceS = maxVarianceFactor * baseSize
+            val finalSize = (baseSize + (rng.nextFloat() - 0.5f) * varianceS).coerceIn(11f, 50f)
             wordSizes.add(finalSize)
 
             val lowerOpacityBound = lerp(0.85f, 0.7f, profile.opacityDepth * profile.chaosLevel)
