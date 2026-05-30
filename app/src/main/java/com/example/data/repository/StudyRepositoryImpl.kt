@@ -96,7 +96,8 @@ class StudyRepositoryImpl(
                 title = title,
                 orderIndex = index,
                 isSubchapter = isSub,
-                parentTitle = parent
+                parentTitle = parent,
+                nestingLevel = parsedCh.nestingLevel
             )
         }
 
@@ -143,7 +144,7 @@ class StudyRepositoryImpl(
 
     override fun getChaptersForBook(bookId: String): Flow<List<Chapter>> {
         return chapterDao.getChaptersForBook(bookId).map { entities ->
-            entities.map { Chapter(it.id, it.bookId, it.title, it.orderIndex, it.isSubchapter, it.parentTitle) }
+            entities.map { Chapter(it.id, it.bookId, it.title, it.orderIndex, it.isSubchapter, it.parentTitle, it.nestingLevel) }
         }
     }
 
@@ -226,6 +227,21 @@ class StudyRepositoryImpl(
     override suspend fun getRewriteForChapter(bookId: String, chapterIndex: Int): SavedRewrite? {
         return savedRewriteDao.getRewriteForChapter(bookId, chapterIndex)?.let {
             SavedRewrite(it.id, it.bookId, it.chapterIndex, it.prompt, it.rewrittenText, it.createdAt)
+        }
+    }
+
+    override fun getSavedRewritesForBook(bookId: String): Flow<List<SavedRewrite>> {
+        return savedRewriteDao.getSavedRewritesForBook(bookId).map { entities ->
+            entities.map {
+                SavedRewrite(
+                    id = it.id,
+                    bookId = it.bookId,
+                    chapterIndex = it.chapterIndex,
+                    prompt = it.prompt,
+                    rewrittenText = it.rewrittenText,
+                    createdAt = it.createdAt
+                )
+            }
         }
     }
 

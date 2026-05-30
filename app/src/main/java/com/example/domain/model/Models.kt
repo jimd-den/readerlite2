@@ -24,7 +24,8 @@ data class Chapter(
     val title: String,
     val orderIndex: Int,
     val isSubchapter: Boolean = false,
-    val parentTitle: String? = null
+    val parentTitle: String? = null,
+    val nestingLevel: Int = 0
 )
 
 data class Sentence(

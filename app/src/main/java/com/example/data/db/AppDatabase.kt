@@ -30,7 +30,8 @@ data class ChapterEntity(
     val title: String,
     val orderIndex: Int,
     val isSubchapter: Boolean = false,
-    val parentTitle: String? = null
+    val parentTitle: String? = null,
+    val nestingLevel: Int = 0
 )
 
 @Entity(tableName = "sentences")
@@ -132,6 +133,9 @@ interface SavedRewriteDao {
     @Query("SELECT * FROM saved_rewrites WHERE bookId = :bookId AND chapterIndex = :chapterIndex LIMIT 1")
     suspend fun getRewriteForChapter(bookId: String, chapterIndex: Int): SavedRewriteEntity?
 
+    @Query("SELECT * FROM saved_rewrites WHERE bookId = :bookId ORDER BY createdAt DESC")
+    fun getSavedRewritesForBook(bookId: String): Flow<List<SavedRewriteEntity>>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertRewrite(rewrite: SavedRewriteEntity)
 }
@@ -145,7 +149,7 @@ interface SavedRewriteDao {
         NoteEntity::class,
         SavedRewriteEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

@@ -3,7 +3,8 @@ package com.example.domain.model
 data class ParsedChapterDomain(
     val title: String,
     val isSubchapter: Boolean,
-    val parentTitle: String?
+    val parentTitle: String?,
+    val nestingLevel: Int = 0
 )
 
 data class ParsedSentenceDomain(

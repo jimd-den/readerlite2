@@ -135,6 +135,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    // Saved AI Rewrites for selected book
+    val savedRewritesForBook: StateFlow<List<SavedRewrite>> = _selectedBookId
+        .flatMapLatest { bookId ->
+            if (bookId != null) repository.getSavedRewritesForBook(bookId)
+            else flowOf(emptyList())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     // UI state holder
     private val _activeClass = MutableStateFlow<StudyClass?>(null)
     val activeClass: StateFlow<StudyClass?> = _activeClass.asStateFlow()

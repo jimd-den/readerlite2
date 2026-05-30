@@ -19,7 +19,8 @@ class EpubExtractorImpl : EpubExtractor {
         val fragment: String,
         val originalHref: String,
         val isSubchapter: Boolean = false,
-        val parentTitle: String? = null
+        val parentTitle: String? = null,
+        val nestingLevel: Int = 0
     )
 
     override fun parseEpub(inputStream: InputStream): EpubStructureDomainModel {
@@ -55,7 +56,9 @@ class EpubExtractorImpl : EpubExtractor {
 
         // Formal container XML search to find the OPF path
         var opfPath = findXmlPackagePath(normalizedZipMap)
-        if (opfPath == null) {
+        if (opfPath != null) {
+            opfPath = opfPath.lowercase().replace('\\', '/').replace("//", "/").trimStart('/')
+        } else {
             // Fallback for non-compliant/loose packaging
             val opfEntry = normalizedZipMap.entries.find { it.key.endsWith(".opf") }
             opfPath = opfEntry?.key
@@ -162,8 +165,7 @@ class EpubExtractorImpl : EpubExtractor {
         val resolvedNavHref = navHref ?: manifest.values.find { it.contains("nav.xhtml") || it.contains("toc.xhtml") }
         if (opfPath != null && resolvedNavHref != null) {
             val decodedNavHref = safeUrlDecode(resolvedNavHref)
-            val navPathInZip = (opfFolderPrefix + decodedNavHref).lowercase()
-                .replace('\\', '/').replace("//", "/").trimStart('/')
+            val navPathInZip = resolveRelativePath(opfFolderPrefix + decodedNavHref).lowercase()
             val navBytes = normalizedZipMap[navPathInZip]
             if (navBytes != null) {
                 val navXmlStr = String(navBytes, Charsets.UTF_8)
@@ -180,8 +182,7 @@ class EpubExtractorImpl : EpubExtractor {
             val resolvedNcxHref = tocNcxHref ?: manifest.values.find { it.endsWith(".ncx") }
             if (resolvedNcxHref != null) {
                 val decodedNcxHref = safeUrlDecode(resolvedNcxHref)
-                val ncxPathInZip = (opfFolderPrefix + decodedNcxHref).lowercase()
-                    .replace('\\', '/').replace("//", "/").trimStart('/')
+                val ncxPathInZip = resolveRelativePath(opfFolderPrefix + decodedNcxHref).lowercase()
                 val ncxBytes = normalizedZipMap[ncxPathInZip]
                 if (ncxBytes != null) {
                     val ncxXmlStr = String(ncxBytes, Charsets.UTF_8)
@@ -208,19 +209,36 @@ class EpubExtractorImpl : EpubExtractor {
             }
         }
 
-        val chaptersList = mutableListOf<ParsedChapterDomain>()
+        val hasToc = unifiedTocList.isNotEmpty()
+        val chaptersList = if (hasToc) {
+            unifiedTocList.map { item ->
+                ParsedChapterDomain(
+                    title = item.title,
+                    isSubchapter = item.isSubchapter,
+                    parentTitle = item.parentTitle
+                )
+            }.toMutableList()
+        } else {
+            mutableListOf<ParsedChapterDomain>()
+        }
         val sentencesList = mutableListOf<ParsedSentenceDomain>()
+        val sentenceCountMap = mutableMapOf<Int, Int>()
+        var lastActiveChapterIndex = 0
 
         for (idref in spine) {
             val relativeHref = manifest[idref] ?: continue
             val decodedHref = safeUrlDecode(relativeHref)
-            val entryPath = (opfFolderPrefix + decodedHref).lowercase()
-                .replace('\\', '/').replace("//", "/").trimStart('/')
+            val entryPath = resolveRelativePath(opfFolderPrefix + decodedHref).lowercase()
             
             val fileBytes = normalizedZipMap[entryPath]
             if (fileBytes != null) {
                 val fileContent = String(fileBytes, Charsets.UTF_8)
-                val fileTocItems = unifiedTocList.filter { it.zipPath == entryPath }
+                val fileTocItemsWithIndex = if (hasToc) {
+                    unifiedTocList.mapIndexed { index, item -> index to item }
+                        .filter { (_, item) -> item.zipPath == entryPath }
+                } else {
+                    emptyList()
+                }
                 
                 var fallbackTitle = entryPath.substringAfterLast("/").substringBeforeLast(".")
                 
@@ -256,22 +274,25 @@ class EpubExtractorImpl : EpubExtractor {
                     }
                 }
 
-                val fileChapters = if (fileTocItems.isNotEmpty()) {
-                    fileTocItems.map { item ->
+                val fileChapters = if (hasToc) {
+                    fileTocItemsWithIndex.map { (_, item) ->
                         ParsedChapterDomain(item.title, item.isSubchapter, item.parentTitle)
                     }
                 } else {
-                    listOf(ParsedChapterDomain(fallbackTitle, false, null))
+                    val fbChapter = ParsedChapterDomain(fallbackTitle, false, null)
+                    chaptersList.add(fbChapter)
+                    listOf(fbChapter)
                 }
 
-                val activeChapterIndexStart = chaptersList.size
+                val fallbackChapterIndex = if (hasToc) 0 else chaptersList.size - 1
                 
                 // Inject our boundary markers into raw html Content BEFORE stripping
                 val modifiedHtml = injectChapterBoundaries(
                     htmlContent = fileContent,
-                    fileTocItems = fileTocItems,
+                    fileTocItemsWithIndex = fileTocItemsWithIndex,
                     fallbackTitle = fallbackTitle,
-                    activeChapterIndexStart = activeChapterIndexStart
+                    fallbackChapterIndex = fallbackChapterIndex,
+                    hasToc = hasToc
                 )
 
                 val allChaptersSet = fileChapters.filter { !it.isSubchapter }.map { cleanForMatch(it.title) }.toSet()
@@ -279,11 +300,7 @@ class EpubExtractorImpl : EpubExtractor {
 
                 val textOnly = stripHtml(modifiedHtml, allChaptersSet, allSubheadingsSet)
                 if (textOnly.isNotBlank()) {
-                    chaptersList.addAll(fileChapters)
-
                     val lines = textOnly.split("\n")
-                    var currentActiveSubIndex = 0
-                    var sentenceCount = 0
 
                     for (line in lines) {
                         val lineTrimmed = line.trim()
@@ -294,15 +311,22 @@ class EpubExtractorImpl : EpubExtractor {
                             val parsedGlobalIdx = lineTrimmed.removePrefix("[AISTUDIO_CH_BOUNDARY_")
                                 .removeSuffix("]").toIntOrNull()
                             if (parsedGlobalIdx != null) {
-                                val localIdx = parsedGlobalIdx - activeChapterIndexStart
-                                if (localIdx in fileChapters.indices) {
-                                    currentActiveSubIndex = localIdx
-                                }
-                                continue // Skip marker line
+                                lastActiveChapterIndex = parsedGlobalIdx
                             }
+                            continue // Skip marker line
                         }
 
                         val cleanLine = cleanForMatch(lineTrimmed)
+
+                        // Try to find the exact chapter/subchapter globally so we transition boundary correctly
+                        val matchedIndex = if (hasToc) {
+                            chaptersList.indexOfFirst { cleanForMatch(it.title) == cleanLine }
+                        } else -1
+
+                        if (matchedIndex != -1) {
+                            lastActiveChapterIndex = matchedIndex
+                            continue
+                        }
 
                         // Skip lines that are exactly the chapter/subchapter heading titles to avoid including titles as body sentences
                         val matchesAnyHeader = fileChapters.any { cleanForMatch(it.title) == cleanLine }
@@ -310,22 +334,30 @@ class EpubExtractorImpl : EpubExtractor {
                             continue
                         }
 
-                        val sentences = lineTrimmed.split(Regex("(?<=[.!?])\\s+"))
-                        val activeGlChapterIndex = activeChapterIndexStart + currentActiveSubIndex
-                        val sectionTitle = fileChapters[currentActiveSubIndex].title
+                        // Determine section title and chapter title
+                        val currentChapterTitle = if (lastActiveChapterIndex in chaptersList.indices) {
+                            chaptersList[lastActiveChapterIndex].title
+                        } else {
+                            fallbackTitle
+                        }
+                        
+                        val activeGlChapterIndex = lastActiveChapterIndex
+                        val sectionTitle = currentChapterTitle
 
+                        val sentences = lineTrimmed.split(Regex("(?<=[.!?])\\s+"))
                         for (sent in sentences) {
                             val sText = sent.trim()
                             if (sText.isNotEmpty()) {
+                                val currentCount = sentenceCountMap[activeGlChapterIndex] ?: 0
                                 sentencesList.add(
                                     ParsedSentenceDomain(
                                         chapterIndex = activeGlChapterIndex,
-                                        sentenceIndex = sentenceCount,
+                                        sentenceIndex = currentCount,
                                         text = sText,
                                         sectionTitle = sectionTitle
                                     )
                                 )
-                                sentenceCount++
+                                sentenceCountMap[activeGlChapterIndex] = currentCount + 1
                             }
                         }
                     }
@@ -445,6 +477,8 @@ class EpubExtractorImpl : EpubExtractor {
                 eventType = parser.next()
             }
 
+            val singleTopLevel = rootNode.children.size == 1 && rootNode.children[0].children.isNotEmpty()
+
             fun traverse(node: NavPointNode, depth: Int, parentTitle: String?) {
                 if (node != rootNode) {
                     val title = node.title
@@ -453,11 +487,21 @@ class EpubExtractorImpl : EpubExtractor {
                         val zipPath = getAbsoluteZipPath(src, navPath)
                         val fragment = getFragment(src)
                         val isSubch = depth > 0
-                        items.add(TempTocItem(title, zipPath, fragment, src, isSubch, parentTitle))
+                        items.add(TempTocItem(title, zipPath, fragment, src, isSubch, parentTitle, depth))
                     }
                 }
                 for (child in node.children) {
-                    traverse(child, depth + if (node == rootNode) 0 else 1, if (node == rootNode) null else node.title)
+                    val childDepth = when {
+                        node == rootNode -> 0
+                        singleTopLevel && node == rootNode.children[0] -> 0
+                        else -> depth + 1
+                    }
+                    val nextParentTitle = when {
+                        node == rootNode -> null
+                        singleTopLevel && node == rootNode.children[0] -> null
+                        else -> node.title
+                    }
+                    traverse(child, childDepth, nextParentTitle)
                 }
             }
 
@@ -514,10 +558,11 @@ class EpubExtractorImpl : EpubExtractor {
                 val name = rawName?.lowercase()
                 when (eventType) {
                     XmlPullParser.START_TAG -> {
-                        if (name == "navpoint") {
+                        if (name == "navpoint" || name?.endsWith(":navpoint") == true) {
                             var navId = ""
                             for (i in 0 until parser.attributeCount) {
-                                if (parser.getAttributeName(i).lowercase() == "id") {
+                                val attr = parser.getAttributeName(i).lowercase()
+                                if (attr == "id" || attr.endsWith(":id")) {
                                     navId = parser.getAttributeValue(i) ?: ""
                                     break
                                 }
@@ -525,13 +570,14 @@ class EpubExtractorImpl : EpubExtractor {
                             val newNode = NavPointNode(id = navId, parent = currentNode)
                             currentNode.children.add(newNode)
                             currentNode = newNode
-                        } else if (name == "text") {
+                        } else if (name == "text" || name?.endsWith(":text") == true) {
                             inLabelText = true
                             textBuilder.setLength(0)
-                        } else if (name == "content") {
+                        } else if (name == "content" || name?.endsWith(":content") == true) {
                             var srcVal = ""
                             for (i in 0 until parser.attributeCount) {
-                                if (parser.getAttributeName(i).lowercase() == "src") {
+                                val attr = parser.getAttributeName(i).lowercase()
+                                if (attr == "src" || attr.endsWith(":src")) {
                                     srcVal = parser.getAttributeValue(i) ?: ""
                                     break
                                 }
@@ -545,10 +591,10 @@ class EpubExtractorImpl : EpubExtractor {
                         }
                     }
                     XmlPullParser.END_TAG -> {
-                        if (name == "text") {
+                        if (name == "text" || name?.endsWith(":text") == true) {
                             inLabelText = false
                             currentNode.title = textBuilder.toString().trim()
-                        } else if (name == "navpoint") {
+                        } else if (name == "navpoint" || name?.endsWith(":navpoint") == true) {
                             currentNode = currentNode.parent ?: rootNode
                         }
                     }
@@ -556,6 +602,8 @@ class EpubExtractorImpl : EpubExtractor {
                 eventType = parser.next()
             }
             
+            val singleTopLevel = rootNode.children.size == 1 && rootNode.children[0].children.isNotEmpty()
+
             fun traverse(node: NavPointNode, depth: Int, parentTitle: String?) {
                 if (node != rootNode) {
                     val title = node.title
@@ -564,11 +612,21 @@ class EpubExtractorImpl : EpubExtractor {
                         val zipPath = getAbsoluteZipPath(src, ncxPath)
                         val fragment = getFragment(src)
                         val isSubch = depth > 0
-                        items.add(TempTocItem(title, zipPath, fragment, src, isSubch, parentTitle))
+                        items.add(TempTocItem(title, zipPath, fragment, src, isSubch, parentTitle, depth))
                     }
                 }
                 for (child in node.children) {
-                    traverse(child, depth + if (node == rootNode) 0 else 1, if (node == rootNode) null else node.title)
+                    val childDepth = when {
+                        node == rootNode -> 0
+                        singleTopLevel && node == rootNode.children[0] -> 0
+                        else -> depth + 1
+                    }
+                    val nextParentTitle = when {
+                        node == rootNode -> null
+                        singleTopLevel && node == rootNode.children[0] -> null
+                        else -> node.title
+                    }
+                    traverse(child, childDepth, nextParentTitle)
                 }
             }
             
@@ -672,32 +730,56 @@ class EpubExtractorImpl : EpubExtractor {
         )
     }
 
+    private fun resolveRelativePath(path: String): String {
+        val normalized = path.replace('\\', '/').replace("//", "/").trimStart('/')
+        val segments = normalized.split('/')
+        val resolvedSegments = mutableListOf<String>()
+        for (segment in segments) {
+            when (segment) {
+                "" -> {} // Ignore empty segments
+                "." -> {} // Ignore self-directory references
+                ".." -> {
+                    if (resolvedSegments.isNotEmpty()) {
+                        resolvedSegments.removeAt(resolvedSegments.size - 1)
+                    }
+                }
+                else -> {
+                    resolvedSegments.add(segment)
+                }
+            }
+        }
+        return resolvedSegments.joinToString("/")
+    }
+
     private fun getAbsoluteZipPath(relativeHref: String, sourceFilePath: String): String {
+        val decodedHref = safeUrlDecode(relativeHref).substringBefore("#")
         val folder = if (sourceFilePath.contains("/")) sourceFilePath.substringBeforeLast("/") + "/" else ""
-        val decodedHref = safeUrlDecode(relativeHref)
-        val combinedAndNormalized = (folder + decodedHref).lowercase()
-            .replace('\\', '/').replace("//", "/").trimStart('/')
-        return combinedAndNormalized.substringBefore("#")
+        return resolveRelativePath(folder + decodedHref).lowercase()
     }
 
     private fun injectChapterBoundaries(
         htmlContent: String,
-        fileTocItems: List<TempTocItem>,
+        fileTocItemsWithIndex: List<Pair<Int, TempTocItem>>,
         fallbackTitle: String,
-        activeChapterIndexStart: Int
+        fallbackChapterIndex: Int,
+        hasToc: Boolean
     ): String {
         var updatedHtml = htmlContent
         
-        if (fileTocItems.isEmpty()) {
+        if (!hasToc) {
             // Just a fallback chapter, put boundary at the start
-            return "\n\n[AISTUDIO_CH_BOUNDARY_${activeChapterIndexStart}]\n\n" + updatedHtml
+            return "\n\n[AISTUDIO_CH_BOUNDARY_${fallbackChapterIndex}]\n\n" + updatedHtml
+        }
+        
+        if (fileTocItemsWithIndex.isEmpty()) {
+            // Continuation file or front/back matter that is not representable in TOC
+            return updatedHtml
         }
         
         var cachedLowercase: String? = null
         
-        for (i in fileTocItems.indices) {
-            val item = fileTocItems[i]
-            val globalIdx = activeChapterIndexStart + i
+        for (i in fileTocItemsWithIndex.indices) {
+            val (globalIdx, item) = fileTocItemsWithIndex[i]
             val boundaryMarker = "[AISTUDIO_CH_BOUNDARY_${globalIdx}]"
             
             val anchor = item.fragment.trim()
@@ -760,9 +842,9 @@ class EpubExtractorImpl : EpubExtractor {
     }
 
     private fun stripHtml(html: String, chapters: Set<String>, subheadings: Set<String>): String {
-        val cleanTxt = html.replace("<style[^>]*>.*?</style>".toRegex(RegexOption.IGNORE_CASE), "")
-            .replace("<script[^>]*>.*?</script>".toRegex(RegexOption.IGNORE_CASE), "")
-            .replace("<[^>]*>".toRegex(), " ")
+        val cleanTxt = html.replace("<style[^>]*>.*?</style>".toRegex(setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)), "")
+            .replace("<script[^>]*>.*?</script>".toRegex(setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)), "")
+            .replace("<[^>]*>".toRegex(RegexOption.DOT_MATCHES_ALL), " ")
             .replace("&nbsp;", " ")
             .replace("&amp;", "&")
             .replace("&lt;", "<")

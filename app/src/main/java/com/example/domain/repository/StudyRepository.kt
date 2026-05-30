@@ -38,5 +38,6 @@ interface StudyRepository {
     suspend fun deleteNote(noteId: String)
 
     suspend fun getRewriteForChapter(bookId: String, chapterIndex: Int): SavedRewrite?
+    fun getSavedRewritesForBook(bookId: String): Flow<List<SavedRewrite>>
     suspend fun saveRewrite(bookId: String, chapterIndex: Int, prompt: String, rewrittenText: String)
 }

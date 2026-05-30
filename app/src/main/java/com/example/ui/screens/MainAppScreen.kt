@@ -128,6 +128,7 @@ fun MainAppScreen(
     val chapters by viewModel.chapters.collectAsState()
     val sentences by viewModel.sentences.collectAsState()
     val notes by viewModel.notes.collectAsState()
+    val savedRewrites by viewModel.savedRewritesForBook.collectAsState()
 
     val activeClass by viewModel.activeClass.collectAsState()
     val activeBook by viewModel.activeBook.collectAsState()
@@ -402,6 +403,7 @@ fun MainAppScreen(
                         isRewriting = isRewriting,
                         activeRewrite = activeRewrite,
                         currentReadingMode = currentReadingMode,
+                        savedRewrites = savedRewrites,
                         isTablet = isTablet,
                         profile = activeProfile,
                         customFontFamily = activeFontFamily,
@@ -1053,6 +1055,7 @@ fun ReadingWorkspaceScreen(
     isRewriting: Boolean,
     activeRewrite: SavedRewrite?,
     currentReadingMode: String,
+    savedRewrites: List<SavedRewrite>,
     isTablet: Boolean,
     profile: MixProfile,
     customFontFamily: FontFamily?,
@@ -1103,6 +1106,12 @@ fun ReadingWorkspaceScreen(
                 onClick = { workspaceTab = 2 },
                 text = { Text("3. REVIEW", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
                 icon = { Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp)) }
+            )
+            Tab(
+                selected = workspaceTab == 3,
+                onClick = { workspaceTab = 3 },
+                text = { Text("4. AI LIBRARY", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                icon = { Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp)) }
             )
         }
 
@@ -1155,6 +1164,13 @@ fun ReadingWorkspaceScreen(
                         onDeleteNote = onDeleteNote
                     )
                 }
+                3 -> {
+                    // AI LIBRARY: Exhibiting saved translation versions
+                    AiLibraryPane(
+                        savedRewrites = savedRewrites,
+                        chapters = chapters
+                    )
+                }
             }
         }
     }
@@ -1175,6 +1191,18 @@ fun SurveyOutlinePane(
     var expandedChapterIndex by remember { mutableStateOf(-1) }
     var showRewriteDialog by remember { mutableStateOf(false) }
     var targetRewriteChapter by remember { mutableStateOf<Chapter?>(null) }
+
+    val chapterNumbers = remember(chapters) {
+        var currentMainChapterNum = 0
+        chapters.map { ch ->
+            if (!ch.isSubchapter) {
+                currentMainChapterNum += 1
+                currentMainChapterNum
+            } else {
+                0
+            }
+        }
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -1206,7 +1234,7 @@ fun SurveyOutlinePane(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = if (chapter.isSubchapter) 24.dp else 0.dp)
+                    .padding(start = (chapter.nestingLevel * 16).dp)
                     .animateContentSize()
             ) {
                 Row(
@@ -1235,7 +1263,7 @@ fun SurveyOutlinePane(
                             text = if (chapter.isSubchapter) {
                                 if (chapter.parentTitle != null) "Subchapter under ${chapter.parentTitle}" else "Subchapter"
                             } else {
-                                "Chapter ${chapter.orderIndex + 1}"
+                                "Chapter ${chapterNumbers.getOrElse(idx) { chapter.orderIndex + 1 }}"
                             },
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
@@ -2326,3 +2354,124 @@ fun ReviewNotesPane(
         }
     }
 }
+
+@Composable
+fun AiLibraryPane(
+    savedRewrites: List<SavedRewrite>,
+    chapters: List<Chapter>
+) {
+    if (savedRewrites.isEmpty()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(32.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.AutoAwesome,
+                    contentDescription = null,
+                    modifier = Modifier.size(64.dp),
+                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "AI Library is Empty",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "To generate rewrites, go to the '1. SURVEY' tab, select a chapter, and select an AI reading style.",
+                    textAlign = TextAlign.Center,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    } else {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            items(savedRewrites) { rewrite ->
+                val associatedCh = chapters.getOrNull(rewrite.chapterIndex)
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = if (associatedCh != null) {
+                                        if (associatedCh.isSubchapter) {
+                                            "Subchapter: ${associatedCh.title}"
+                                        } else {
+                                            "Chapter ${associatedCh.orderIndex + 1}: ${associatedCh.title}"
+                                        }
+                                    } else "Chapter ${rewrite.chapterIndex + 1}",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Saved AI Translation",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            
+                            // Style chip
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(MaterialTheme.colorScheme.primaryContainer)
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = rewrite.prompt,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
+                        }
+                        
+                        HorizontalDivider(
+                            modifier = Modifier.padding(vertical = 12.dp),
+                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f)
+                        )
+                        
+                        Text(
+                            text = rewrite.rewrittenText,
+                            fontSize = 13.sp,
+                            lineHeight = 18.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
