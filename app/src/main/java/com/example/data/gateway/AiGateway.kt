@@ -20,25 +20,54 @@ object AiGateway {
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    suspend fun rewriteChapter(originalText: String, rewriteStyle: String): String = withContext(Dispatchers.IO) {
+    suspend fun rewriteChapter(
+        originalText: String,
+        rewriteStyle: String,
+        customPrompt: String? = null,
+        forceSimulation: Boolean = false
+    ): String = withContext(Dispatchers.IO) {
         val apiKey = BuildConfig.GEMINI_API_KEY
-        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY" || apiKey.contains("placeholder", ignoreCase = true)) {
-            Log.w(TAG, "No valid Gemini API key found. Using beautiful local simulation.")
-            return@withContext simulateRewrite(originalText, rewriteStyle)
+        val hasValidKey = apiKey.isNotEmpty() && apiKey != "MY_GEMINI_API_KEY" && !apiKey.contains("placeholder", ignoreCase = true)
+
+        if (forceSimulation || !hasValidKey) {
+            if (!forceSimulation && !hasValidKey) {
+                throw IllegalArgumentException("No valid Gemini API key found in your environment! Please set your GEMINI_API_KEY in the Google AI Studio Secrets panel, or toggle 'Enable Demo Simulation' on.")
+            }
+            Log.w(TAG, "Using beautiful local simulation.")
+            return@withContext simulateRewrite(originalText, customPrompt ?: rewriteStyle)
         }
 
-        val prompt = """
-            You are a master educator design genius like Shigeru Miyamoto. 
-            Rewrite the following educational text into the specified style: "$rewriteStyle".
-            Requirements:
-            1. Keep it highly engaging and clear.
-            2. Divide with clear structural subheadings using "## Subheading Name" or "Chapter X: Title".
-            3. Ensure each sentence is impactful, because the user reads this one sentence at a time.
-            4. Retain all major concepts but make them effortless to read.
-            
-            Original Text:
-            $originalText
-        """.trimIndent()
+        val prompt = if (!customPrompt.isNullOrBlank()) {
+            """
+                You are a master educator design genius like Shigeru Miyamoto.
+                The user wants you to rewrite/process this chapter text using the following custom instruction/prompt:
+                
+                Custom Instruction / Prompt:
+                "$customPrompt"
+                
+                Requirements:
+                1. Keep it highly engaging and clear.
+                2. Divide the rewritten content with clear structural subheadings using markdown headers (e.g., "## Subheading Name" or "Chapter X: Title").
+                3. Ensure each sentence is impactful and complete, because the user reads this one sentence at a time.
+                4. Retain all major concepts but make them effortless to read.
+                
+                Original Text Context:
+                $originalText
+            """.trimIndent()
+        } else {
+            """
+                You are a master educator design genius like Shigeru Miyamoto. 
+                Rewrite the following educational text into the specified style: "$rewriteStyle".
+                Requirements:
+                1. Keep it highly engaging and clear.
+                2. Divide with clear structural subheadings using "## Subheading Name" or "Chapter X: Title".
+                3. Ensure each sentence is impactful, because the user reads this one sentence at a time.
+                4. Retain all major concepts but make them effortless to read.
+                
+                Original Text:
+                $originalText
+            """.trimIndent()
+        }
 
         try {
             // Build Gemini request body
@@ -62,8 +91,9 @@ object AiGateway {
 
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    Log.e(TAG, "API call failed with code: ${response.code}. Falling back to simulation.")
-                    return@withContext simulateRewrite(originalText, rewriteStyle)
+                    val errorBody = response.body?.string() ?: ""
+                    Log.e(TAG, "API call failed with code: ${response.code} body: $errorBody")
+                    throw Exception("Google Gemini API call failed with code ${response.code}. Service output: $errorBody")
                 }
 
                 val responseBodyStr = response.body?.string() ?: ""
@@ -80,28 +110,15 @@ object AiGateway {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error generating AI rewrite", e)
-            return@withContext simulateRewrite(originalText, rewriteStyle)
+            throw e
         }
     }
 
-    private fun simulateRewrite(originalText: String, style: String): String {
-        return when (style) {
-            "Elementary / Ultra-Simple" -> """
-                # Chapter Rewrite: Effortless Clarity
-                ## Starting with a Clear Mind
-                Let's make this simple: Learning is like playing a video game.
-                Before you run into a level, you look at the total map to see what is ahead.
-                This is exactly what "Surveying" means.
-                If you look at the outline first, you will not get lost.
-                
-                ## Asking Great Questions
-                Next, you turn headings into little puzzles or questions.
-                For example, instead of reading "Continuous Memory Allocation", you ask, "How does memory stay in a neat row?"
-                This keeps your curiosity active, just like scouting for secret treasures.
-                Every paragraph becomes an answer you are actively hunting for!
-            """.trimIndent()
-            "Socratic / Inquiry-Driven" -> """
-                # Chapter Rewrite: The Socratic Journey
+    private fun simulateRewrite(originalText: String, styleOrPrompt: String): String {
+        val displayStyle = if (styleOrPrompt.length > 50) styleOrPrompt.take(47) + "..." else styleOrPrompt
+        return when {
+            styleOrPrompt.contains("Socratic", ignoreCase = true) -> """
+                # Chapter Socratic Query: $displayStyle
                 ## Why do we Survey First?
                 Have you ever wondered why we read chapters from start to finish without pausing?
                 Does an explorer enter a dungeon without looking at the geographic blueprints?
@@ -114,17 +131,31 @@ object AiGateway {
                 How can we record meaning unless we are actively seeking an answer to our own query?
                 The note you write is the prize of a question answered.
             """.trimIndent()
-            else -> """
-                # Chapter Rewrite: High Hooking Action
-                ## The Hook of Structure
-                Look at this layout: Clean headings are the checkpoints of your study speedrun.
-                Survey the map first. Identify where the chapters begin and where the subheadings divide.
-                This is your tactical setup. Don't skip it, or you're running blind.
+            
+            styleOrPrompt.contains("Elementary", ignoreCase = true) || styleOrPrompt.contains("Simple", ignoreCase = true) -> """
+                # Chapter Simple Summary: $displayStyle
+                ## Starting with a Clear Mind
+                Let's make this simple: Learning is like playing a video game.
+                Before you run into a level, you look at the total map to see what is ahead.
+                This is exactly what "Surveying" means.
+                If you look at the outline first, you will not get lost.
                 
-                ## Active Capture Loop
-                Now convert those subheadings into active questions.
-                Read sentence by sentence with explosive typography variations to keep your focus locked.
-                Record notes on the fly and review them regularly to lock those facts into your long-term directory.
+                ## Asking Great Questions
+                Next, you turn headings into little puzzles or questions.
+                For example, instead of reading "Continuous Memory Allocation", you ask, "How does memory stay in a neat row?"
+                This keeps your curiosity active, just like scouting for secret treasures.
+                Every paragraph becomes an answer you are actively hunting for!
+            """.trimIndent()
+
+            else -> """
+                # AI Simulation: $displayStyle
+                ## SQR5 Adapter Block
+                Using custom instruction: "$displayStyle"
+                Here is the adapted chapter content:
+                - **Concept 1: Active Surveying**: Always outline your chapters so you have anchors of knowledge.
+                - **Concept 2: Generative Prompts**: Actively form Socratic connections around complex definitions.
+                - **Concept 3: Sentinel Checking**: Double check your summaries and errors to sharpen recall.
+                - **Concept 4: Spaced Recall**: Return to notes in your AI Library repeatedly.
             """.trimIndent()
         }
     }

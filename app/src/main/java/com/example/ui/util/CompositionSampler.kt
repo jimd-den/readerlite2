@@ -199,18 +199,8 @@ object CompositionSampler {
             }
             phraseTranslateYStart.add(offset)
 
-            val delay = when (wordTimingCurve) {
-                "ease-out" -> (p * tempoMs * (1f - (p.toFloat() / phraseCount.toFloat()) * 0.4f)).toLong()
-                "burst" -> {
-                    val center = phraseCount / 2
-                    abs(p - center) * tempoMs
-                }
-                "wave" -> {
-                    val angle = (p.toFloat() / phraseCount.toFloat()) * PI
-                    (sin(angle) * tempoMs * phraseCount * 0.5f).toLong()
-                }
-                else -> p * tempoMs
-            }
+            // Ensure strictly sequential left-to-right reading order
+            val delay = (p * tempoMs).toLong()
             phraseDelays.add(delay)
         }
 

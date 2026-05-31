@@ -135,6 +135,8 @@ fun MainAppScreen(
     val activeChapter by viewModel.activeChapter.collectAsState()
     val activeSentenceIndex by viewModel.activeSentenceIndex.collectAsState()
     val isRewriting by viewModel.isRewriting.collectAsState()
+    val rewriteProgress by viewModel.rewriteProgress.collectAsState()
+    val rewriteError by viewModel.rewriteError.collectAsState()
     val activeRewrite by viewModel.activeRewrite.collectAsState()
     val currentReadingMode by viewModel.currentReadingMode.collectAsState()
     val rewrittenSentences by viewModel.rewrittenSentences.collectAsState()
@@ -420,7 +422,9 @@ fun MainAppScreen(
                         },
                         onDeleteNote = { id -> viewModel.deleteNote(id) },
                         onToggleMode = { mode -> viewModel.toggleReadingMode(mode) },
-                        onAIStyleSelected = { style -> viewModel.rewriteActiveChapter(style) },
+                        onAIStyleSelected = { style, prompt, simulate, notify ->
+                            viewModel.rewriteActiveChapter(style, prompt, simulate, notify)
+                        },
                         onProfileSelected = { viewModel.selectMixProfile(it) },
                         onSaveProfile = { viewModel.saveAsCustomProfile(it) },
                         onResetDefaults = { viewModel.resetProfileToDefaults() },
@@ -747,6 +751,77 @@ fun MainAppScreen(
             }
         )
     }
+
+    // Error Alert Dialog for Rewrite failures
+    if (rewriteError != null) {
+        AlertDialog(
+            onDismissRequest = { viewModel.clearRewriteError() },
+            icon = { Icon(Icons.Default.Error, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+            title = { Text("AI Adaptation Failed") },
+            text = {
+                Column {
+                    Text(
+                        text = "An error occurred while communicating with the AI gateway:",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = rewriteError ?: "Unknown Error",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = { viewModel.clearRewriteError() }) {
+                    Text("Dismiss")
+                }
+            }
+        )
+    }
+
+    // Rewrite generator loading screen with real-time progress
+    if (isRewriting) {
+        Dialog(onDismissRequest = {}) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    contentColor = MaterialTheme.colorScheme.onSurface
+                ),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = "AI Adaptation in Progress", 
+                        fontWeight = FontWeight.Bold, 
+                        fontSize = 16.sp,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = rewriteProgress ?: "Processing chapter syntax...", 
+                        fontSize = 13.sp, 
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
 }
 
 // ---------------- SUBVIEW 1: Class Dashboard ----------------
@@ -1068,7 +1143,7 @@ fun ReadingWorkspaceScreen(
     onAddOutlineNoteClick: (Chapter, String?) -> Unit,
     onDeleteNote: (String) -> Unit,
     onToggleMode: (String) -> Unit,
-    onAIStyleSelected: (String) -> Unit,
+    onAIStyleSelected: (String, String?, Boolean, Boolean) -> Unit,
     
     // Engine interactions
     onProfileSelected: (MixProfile) -> Unit,
@@ -1185,7 +1260,7 @@ fun SurveyOutlinePane(
     activeChapter: Chapter?,
     onChapterSelected: (Chapter) -> Unit,
     onAddNoteClick: (Chapter, String?) -> Unit,
-    onAIStyleSelected: (String) -> Unit,
+    onAIStyleSelected: (String, String?, Boolean, Boolean) -> Unit,
     isRewriting: Boolean
 ) {
     var expandedChapterIndex by remember { mutableStateOf(-1) }
@@ -1390,60 +1465,127 @@ fun SurveyOutlinePane(
     }
 
     if (showRewriteDialog) {
+        var customPrompt by remember { mutableStateOf("") }
+        var notifyOnComplete by remember { mutableStateOf(true) }
+        var forceSimulation by remember { mutableStateOf(false) }
+
         AlertDialog(
             onDismissRequest = { showRewriteDialog = false },
-            title = { Text("Transform Chapter Text via AI Gateway") },
-            text = {
-                Column {
-                    Text(
-                        text = "Your API key translates the prose into engaging study structures designed to simplify complex chapters.",
-                        fontSize = 12.sp,
-                        color = Color.Gray,
-                        modifier = Modifier.padding(bottom = 12.dp)
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.AutoAwesome,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(end = 8.dp)
                     )
-                    listOf("Elementary / Ultra-Simple", "Socratic / Inquiry-Driven", "High Hooking Action").forEach { style ->
-                        Button(
-                            onClick = {
-                                onAIStyleSelected(style)
-                                showRewriteDialog = false
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 4.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
-                        ) {
-                            Text(style)
+                    Text("AI Chapter Adaptation", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "Customize how the AI rewrites and structures this chapter. Enter your custom prompt instructions below, or click any quick template to pre-fill the text.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    // Quick select styles / templates
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf("Elementary", "Socratic", "Summary").forEach { label ->
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(MaterialTheme.colorScheme.secondaryContainer)
+                                    .clickable {
+                                        customPrompt = when (label) {
+                                            "Elementary" -> "Translate this chapter into extremely simple words suitable for elementary school students. Use analogies where possible."
+                                            "Socratic" -> "Formulate this text as a Socratic dialogue. Turn primary definitions into logical headings, and ask deep questions about core concepts."
+                                            else -> "Create an actionable summary of the chapter. Extract key definitions and put them in bold bullet points."
+                                        }
+                                    }
+                                    .padding(vertical = 8.dp, horizontal = 4.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = label,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                                )
+                            }
                         }
+                    }
+
+                    // Multi-line TextField
+                    OutlinedTextField(
+                        value = customPrompt,
+                        onValueChange = { customPrompt = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(115.dp),
+                        placeholder = { Text("E.g., Simplify explanations, rewrite in Spanish, etc...", fontSize = 13.sp) },
+                        label = { Text("Custom Prompt (Optional)") },
+                        textStyle = androidx.compose.ui.text.TextStyle(fontSize = 13.sp),
+                        maxLines = 4
+                    )
+
+                    // Options
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("Notify me when completed", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        Switch(
+                            checked = notifyOnComplete,
+                            onCheckedChange = { notifyOnComplete = it }
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Enable Demo Simulation", fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                            Text("Generate offline summary locally if no Gemini Key", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(
+                            checked = forceSimulation,
+                            onCheckedChange = { forceSimulation = it }
+                        )
                     }
                 }
             },
-            confirmButton = {},
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val defaultStyle = "High Hooking Action"
+                        onAIStyleSelected(defaultStyle, customPrompt.ifBlank { null }, forceSimulation, notifyOnComplete)
+                        showRewriteDialog = false
+                    },
+                    modifier = Modifier.testTag("submit_rewrite_button")
+                ) {
+                    Text("Adapt Chapter")
+                }
+            },
             dismissButton = {
                 TextButton(onClick = { showRewriteDialog = false }) {
                     Text("Cancel")
                 }
             }
         )
-    }
-
-    // Rewrite generator loading screen
-    if (isRewriting) {
-        Dialog(onDismissRequest = {}) {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = Color.White),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Column(
-                    modifier = Modifier.padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    CircularProgressIndicator()
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text("Gateway generating AI rewrite...", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    Text("Taking original sentences and adapting syntax...", fontSize = 11.sp, color = Color.Gray)
-                }
-            }
-        }
     }
 }
 

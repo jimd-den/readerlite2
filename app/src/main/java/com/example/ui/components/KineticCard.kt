@@ -194,8 +194,8 @@ fun KineticCard(
                     var wordCounter = 0
                     composition.phrases.forEachIndexed { pIdx, phraseText ->
                         val startWordGlobalIdx = wordCounter
-                        val phraseWordCount = phraseText.split(" ").filter { it.isNotEmpty() }.size
-                        wordCounter += phraseWordCount
+                        val wordsComp = phraseText.split(" ").filter { it.isNotEmpty() }
+                        wordCounter += wordsComp.size
 
                         var isAnimated by remember(sentenceId) { mutableStateOf(false) }
                         LaunchedEffect(sentenceId) {
@@ -234,37 +234,42 @@ fun KineticCard(
                             label = "p_scale_${sentenceId}_$pIdx"
                         )
 
-                        val wordsComp = phraseText.split(" ").filter { it.isNotEmpty() }
-                        wordsComp.forEachIndexed { wIdx, word ->
-                            val globalWordIdx = startWordGlobalIdx + wIdx
-                            val weightVal = composition.wordWeights.getOrElse(globalWordIdx) { 400 }
-                            val sizeVal = composition.wordSizes.getOrElse(globalWordIdx) { userFontSize }
-                            val opacityVal = composition.wordOpacities.getOrElse(globalWordIdx) { 1.0f }
-                            val trackingVal = composition.wordTrackings.getOrElse(globalWordIdx) { 0.0f }
+                        // Wrap words of this phrase in a single horizontal row so they stay together as a structural "readable section"
+                        Row(
+                            modifier = Modifier
+                                .graphicsLayer {
+                                    alpha = alphaAnim
+                                    translationY = translateYAnim * density
+                                    scaleX = scaleAnim
+                                    scaleY = scaleAnim
+                                }
+                                .padding(vertical = 4.dp)
+                                .padding(end = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            wordsComp.forEachIndexed { wIdx, word ->
+                                val globalWordIdx = startWordGlobalIdx + wIdx
+                                val weightVal = composition.wordWeights.getOrElse(globalWordIdx) { 400 }
+                                val sizeVal = composition.wordSizes.getOrElse(globalWordIdx) { userFontSize }
+                                val opacityVal = composition.wordOpacities.getOrElse(globalWordIdx) { 1.0f }
+                                val trackingVal = composition.wordTrackings.getOrElse(globalWordIdx) { 0.0f }
 
-                            Text(
-                                text = word,
-                                fontSize = sizeVal.sp,
-                                fontWeight = FontWeight(weightVal),
-                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = opacityVal),
-                                letterSpacing = trackingVal.sp,
-                                fontFamily = customFontFamily ?: when (composition.layoutMode) {
-                                    "display" -> FontFamily.SansSerif
-                                    "poster" -> FontFamily.Serif
-                                    else -> FontFamily.Default
-                                },
-                                modifier = Modifier
-                                    .graphicsLayer {
-                                        alpha = alphaAnim
-                                        translationY = translateYAnim * density
-                                        scaleX = scaleAnim
-                                        scaleY = scaleAnim
-                                    }
-                                    .padding(vertical = 2.dp)
-                                    .padding(end = 6.dp),
-                                softWrap = false,
-                                maxLines = 1
-                            )
+                                Text(
+                                    text = word,
+                                    fontSize = sizeVal.sp,
+                                    fontWeight = FontWeight(weightVal),
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = opacityVal),
+                                    letterSpacing = trackingVal.sp,
+                                    fontFamily = customFontFamily ?: when (composition.layoutMode) {
+                                        "display" -> FontFamily.SansSerif
+                                        "poster" -> FontFamily.Serif
+                                        else -> FontFamily.Default
+                                    },
+                                    modifier = Modifier.padding(end = 6.dp),
+                                    softWrap = false,
+                                    maxLines = 1
+                                )
+                            }
                         }
                     }
                 }

@@ -162,6 +162,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isRewriting = MutableStateFlow<Boolean>(false)
     val isRewriting: StateFlow<Boolean> = _isRewriting.asStateFlow()
 
+    private val _rewriteProgress = MutableStateFlow<String?>(null)
+    val rewriteProgress: StateFlow<String?> = _rewriteProgress.asStateFlow()
+
+    private val _rewriteError = MutableStateFlow<String?>(null)
+    val rewriteError: StateFlow<String?> = _rewriteError.asStateFlow()
+
+    init {
+        // Register notification channel safely
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                val name = "AI Rewrite Updates"
+                val descriptionText = "Notifications for AI chapter adaptation completion"
+                val importance = android.app.NotificationManager.IMPORTANCE_DEFAULT
+                val channel = android.app.NotificationChannel("ai_rewrite_channel", name, importance).apply {
+                    description = descriptionText
+                }
+                val notificationManager = application.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+                notificationManager.createNotificationChannel(channel)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun postRewriteNotification(title: String, text: String) {
+        try {
+            val context = getApplication<Application>()
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            val builder = androidx.core.app.NotificationCompat.Builder(context, "ai_rewrite_channel")
+                .setSmallIcon(android.R.drawable.stat_notify_chat)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setPriority(androidx.core.app.NotificationCompat.PRIORITY_DEFAULT)
+                .setAutoCancel(true)
+            manager.notify(1002, builder.build())
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     private val _currentReadingMode = MutableStateFlow<String>("ORIGINAL") // "ORIGINAL" or "REWRITE"
     val currentReadingMode: StateFlow<String> = _currentReadingMode.asStateFlow()
 
@@ -405,7 +445,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun rewriteActiveChapter(style: String) {
+    fun clearRewriteError() {
+        _rewriteError.value = null
+    }
+
+    fun rewriteActiveChapter(
+        style: String,
+        customPrompt: String? = null,
+        forceSimulation: Boolean = false,
+        notifyOnComplete: Boolean = true
+    ) {
         val bookId = _selectedBookId.value ?: return
         val chapterIndex = _selectedChapterIndex.value
         if (chapterIndex < 0) return
@@ -414,32 +463,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (originalSentences.isEmpty()) return
 
         _isRewriting.value = true
+        _rewriteProgress.value = "Starting chapter rewrite..."
+        _rewriteError.value = null
+
         viewModelScope.launch {
             try {
+                _rewriteProgress.value = "Reading ${originalSentences.size} original sentences..."
                 val fullText = originalSentences.joinToString(" ") { it.text }
+                
                 val key = _openRouterKey.value
                 val model = _openRouterModel.value
                 
                 val rewritten = if (key.isNotBlank()) {
-                    AiGateway.rewriteChapterOpenRouter(key, model, fullText, style)
+                    _rewriteProgress.value = "Connecting to OpenRouter model: $model..."
+                    AiGateway.rewriteChapterOpenRouter(key, model, fullText, customPrompt ?: style)
                 } else {
-                    AiGateway.rewriteChapter(fullText, style)
+                    _rewriteProgress.value = "Sending request to Google Gemini API..."
+                    AiGateway.rewriteChapter(fullText, style, customPrompt, forceSimulation)
                 }
                 
-                repository.saveRewrite(bookId, chapterIndex, style, rewritten)
+                _rewriteProgress.value = "Success! Saving adapted structure to local library..."
+                repository.saveRewrite(bookId, chapterIndex, customPrompt ?: style, rewritten)
                 loadRewrite(bookId, chapterIndex)
                 _currentReadingMode.value = "REWRITE"
                 _activeSentenceIndex.value = 0
+                
+                _rewriteProgress.value = null
+                
+                if (notifyOnComplete) {
+                    postRewriteNotification(
+                        title = "AI Adaptation Complete!",
+                        text = "Successfully processed and added active chapter to your local AI Library."
+                    )
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
-                // Fail-safe fall back to standard Gemini or Simulated rewrite on network error
-                android.widget.Toast.makeText(getApplication(), "OpenRouter failed: ${e.message}. Using offline default instead.", android.widget.Toast.LENGTH_LONG).show()
-                val fullText = originalSentences.joinToString(" ") { it.text }
-                val rewritten = AiGateway.rewriteChapter(fullText, style)
-                repository.saveRewrite(bookId, chapterIndex, style, rewritten)
-                loadRewrite(bookId, chapterIndex)
-                _currentReadingMode.value = "REWRITE"
-                _activeSentenceIndex.value = 0
+                val errorMsg = e.localizedMessage ?: e.message ?: "Unknown error"
+                _rewriteError.value = errorMsg
+                
+                if (notifyOnComplete) {
+                    postRewriteNotification(
+                        title = "AI Adaptation Failed",
+                        text = "An error occurred while rewriting: $errorMsg"
+                    )
+                }
             } finally {
                 _isRewriting.value = false
             }
