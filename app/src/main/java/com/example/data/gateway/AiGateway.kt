@@ -90,13 +90,12 @@ object AiGateway {
                 .build()
 
             client.newCall(request).execute().use { response ->
+                val responseBodyStr = response.body?.string() ?: ""
                 if (!response.isSuccessful) {
-                    val errorBody = response.body?.string() ?: ""
-                    Log.e(TAG, "API call failed with code: ${response.code} body: $errorBody")
-                    throw Exception("Google Gemini API call failed with code ${response.code}. Service output: $errorBody")
+                    Log.e(TAG, "API call failed with code: ${response.code} body: $responseBodyStr")
+                    throw Exception("Google Gemini API call failed with code ${response.code}. Service output: $responseBodyStr")
                 }
 
-                val responseBodyStr = response.body?.string() ?: ""
                 val responseJson = JSONObject(responseBodyStr)
                 val text = responseJson
                     .getJSONArray("candidates")
@@ -225,13 +224,12 @@ object AiGateway {
                 .build()
 
             client.newCall(request).execute().use { response ->
+                val responseBodyStr = response.body?.string() ?: ""
                 if (!response.isSuccessful) {
-                    val errMsg = response.body?.string() ?: ""
-                    Log.e(TAG, "OpenRouter failed: code=${response.code} body=$errMsg")
-                    throw Exception("OpenRouter request failed: code ${response.code}: $errMsg")
+                    Log.e(TAG, "OpenRouter failed: code=${response.code} body=$responseBodyStr")
+                    throw Exception("OpenRouter request failed: code ${response.code}: $responseBodyStr")
                 }
 
-                val responseBodyStr = response.body?.string() ?: ""
                 val responseJson = JSONObject(responseBodyStr)
                 val text = responseJson
                     .getJSONArray("choices")
